@@ -13,6 +13,7 @@ import { Reasoning } from "@/components/reasoning";
 import { ToolFallback } from "@/components/tool-fallback";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
 import { RecordButton } from "@/components/record-button";
+import { MicButton } from "@/components/mic-button";
 import { PlusMenu } from "@/components/plus-menu";
 import { ModelEffortSelector } from "@/components/model-effort-selector";
 import { Button } from "@/components/ui/button";
@@ -278,6 +279,7 @@ const ComposerAction: FC = () => {
         <ModelEffortSelector />
         <PlusMenu />
         <RecordButton />
+        <MicButton />
       </div>
       <div className="flex items-center gap-1.5">
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>

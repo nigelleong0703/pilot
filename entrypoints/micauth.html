@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Pilot — microphone permission</title>
+  </head>
+  <body style="font: 14px system-ui, sans-serif; padding: 32px; max-width: 560px; color: #111">
+    <h1 style="font-size: 16px; margin: 0 0 8px">Enable the microphone for Pilot</h1>
+    <p style="color:#444; line-height:1.5">
+      Pilot uses your microphone for voice narration while recording. Chrome does not show the
+      permission prompt inside the side panel, so approve it here once — it applies to the whole
+      extension afterwards.
+    </p>
+    <button id="allow" style="padding: 8px 14px; font: inherit; cursor: pointer; border: 1px solid #888; border-radius: 6px; background: #fff">
+      Allow microphone
+    </button>
+    <p id="status" style="margin-top: 16px; line-height: 1.5; color: #555"></p>
+    <script type="module" src="./micauth/main.ts"></script>
+  </body>
+</html>

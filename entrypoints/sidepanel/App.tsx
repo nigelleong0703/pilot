@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AssistantRuntimeProvider, useLocalRuntime } from '@assistant-ui/react';
 import { DropdownMenu } from 'radix-ui';
 import {
@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { TooltipProvider } from '../../components/ui/tooltip';
 import { Thread } from '../../components/thread';
+import { MicButton } from '../../components/mic-button';
+import { RecordingSteps } from '../../components/recording-steps';
 import { cn } from '../../lib/utils';
 import { acpAdapter, resetSession, resumeSession } from './adapter';
 import { request, acp, type RecordedStep } from './bridge';
@@ -22,6 +24,7 @@ export default function App() {
   const [recording, setRecording] = useState(false);
   const [stepCount, setStepCount] = useState(0);
   const [threadKey, setThreadKey] = useState(0);
+  const [dictation, setDictation] = useState<{ listening: boolean; pending: boolean }>({ listening: false, pending: false });
   const loadSettings = useSettings((s) => s.load);
 
   useEffect(() => {
@@ -36,6 +39,9 @@ export default function App() {
       }
     };
     chrome.runtime.onMessage.addListener(onMsg);
+    const onDictation = (e: Event) =>
+      setDictation((e as CustomEvent<{ listening: boolean; pending: boolean }>).detail);
+    window.addEventListener('pilot:dictation', onDictation as EventListener);
     request({ type: 'GET_STATE' }).then((r: any) => {
       if (!r) return;
       setBridge(!!r.bridgeConnected);
@@ -43,7 +49,10 @@ export default function App() {
       setStepCount((r.steps ?? []).length);
     });
     request({ type: 'GET_PAGE_CONTEXT' }).then((r: any) => { if (r) setTab({ title: r.title ?? '', url: r.url ?? '' }); });
-    return () => chrome.runtime.onMessage.removeListener(onMsg);
+    return () => {
+      chrome.runtime.onMessage.removeListener(onMsg);
+      window.removeEventListener('pilot:dictation', onDictation as EventListener);
+    };
   }, [loadSettings]);
 
   function newChat() {
@@ -61,9 +70,23 @@ export default function App() {
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
-        {/* Header: history · new chat · ⋮ menu */}
+        {/* Header: back (when not on chat) · history · new chat · menu */}
         <header className="flex items-center justify-between gap-2 border-b px-3 py-2">
-          <span className="text-sm font-semibold">⏺ Pilot</span>
+          <div className="flex min-w-0 items-center gap-1">
+            {view !== 'chat' && (
+              <button
+                onClick={() => setView('chat')}
+                className="-ml-1 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                aria-label="Back to chat"
+                title="Back to chat"
+              >
+                <ArrowLeftIcon className="size-4" />
+              </button>
+            )}
+            <span className="truncate text-sm font-semibold">
+              {view === 'chat' ? 'Pilot' : view === 'settings' ? 'Settings' : view === 'history' ? 'History' : 'Skills'}
+            </span>
+          </div>
           <div className="flex items-center gap-0.5">
             <button
               onClick={() => setView('history')}
@@ -116,26 +139,48 @@ export default function App() {
         </header>
 
         {view === 'settings' ? (
-          <SettingsPage bridge={bridge} onBack={() => setView('chat')} />
+          <SettingsPage bridge={bridge} />
         ) : view === 'history' ? (
-          <HistoryPage onBack={() => setView('chat')} onContinue={continueChat} />
+          <HistoryPage onContinue={continueChat} />
         ) : view === 'skills' ? (
-          <SkillsPage onBack={() => setView('chat')} />
+          <SkillsPage />
         ) : (
           <>
             {recording ? (
-              <div className="flex shrink-0 items-center gap-2 border-b bg-red-50 px-3 py-1.5 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
-                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />
-                Recording · {stepCount} step{stepCount === 1 ? '' : 's'} — act on the page, then Stop.
-              </div>
+              <>
+                <div className="flex shrink-0 items-center gap-2 border-b bg-red-50 px-3 py-1.5 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
+                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                  <span>Recording · {stepCount} step{stepCount === 1 ? '' : 's'}</span>
+                  <span className="truncate text-red-600/80 dark:text-red-300/80">
+                    {dictation.listening ? '· 🎤 listening…' : dictation.pending ? '· 🎤 allow mic…' : '· 🎤 tap to narrate'}
+                  </span>
+                  <div className="ms-auto flex items-center gap-1.5">
+                    <MicButton />
+                    <button
+                      onClick={() => chrome.runtime.sendMessage({ type: 'STOP' }).catch(() => {})}
+                      className="rounded-md bg-red-600 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-red-700"
+                    >
+                      ■ Stop
+                    </button>
+                  </div>
+                </div>
+                <RecordingSteps />
+              </>
             ) : (
-              <div className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5">
-                <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={tab.url || undefined}>
-                  ▸ {tab.title || tab.url || 'no active tab'}
-                </span>
-              </div>
+              <>
+                <div className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5">
+                  <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={tab.url || undefined}>
+                    ▸ Tab: {tab.title || tab.url || 'no active tab'}
+                  </span>
+                </div>
+                <ConnectBanner />
+              </>
             )}
-            <Chat key={threadKey} />
+            {/* Keep Chat mounted (so its record→skill hand-off listener stays alive)
+                but hidden while recording, when the step list owns the panel. */}
+            <div className={recording ? 'hidden' : 'flex min-h-0 flex-1 flex-col'}>
+              <Chat key={threadKey} />
+            </div>
           </>
         )}
       </div>
@@ -188,9 +233,11 @@ function Chat() {
   function handOff(steps: RecordedStep[]) {
     const clean = steps.map(({ screenshot, ...rest }) => rest);
     append(
-      'I just recorded these actions on the page. Analyze them and call the `save_skill` tool ' +
-      'to save a reusable, parameterized skill (short name, one-line description, any inputs that ' +
-      'should be variables, and the ordered browser_* steps to replay it). Then confirm what you saved.' +
+      'I just recorded these actions on the page. Steps with type "note" are my spoken ' +
+      'narration — use them as context for what I was doing and why. Analyze the actions and ' +
+      'call the `save_skill` tool to save a reusable, parameterized skill (short name, one-line ' +
+      'description, any inputs that should be variables, and the ordered browser_* steps to ' +
+      'replay it). Then confirm what you saved.' +
       '\n\n```json\n' + JSON.stringify(clean, null, 2) + '\n```',
     );
   }
@@ -215,7 +262,7 @@ interface SessionSummary {
 }
 interface ChatMsg { role: string; text: string; ts: number; }
 
-function HistoryPage({ onBack, onContinue }: { onBack: () => void; onContinue: (id: string) => void }) {
+function HistoryPage({ onContinue }: { onContinue: (id: string) => void }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [open, setOpen] = useState<{ id: string; messages: ChatMsg[] } | null>(null);
 
@@ -235,13 +282,6 @@ function HistoryPage({ onBack, onContinue }: { onBack: () => void; onContinue: (
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <h2 className="text-sm font-semibold">History</h2>
-        <button onClick={onBack} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent">
-          <ArrowLeftIcon className="size-3.5" /> Back
-        </button>
-      </div>
-
       {open ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
           <button
@@ -296,7 +336,7 @@ function HistoryPage({ onBack, onContinue }: { onBack: () => void; onContinue: (
 // ════════════════════════════════════════════════════════════════════════════
 interface Skill { id: string; name: string; description?: string; inputs?: string[]; steps?: string[] }
 
-function SkillsPage({ onBack }: { onBack: () => void }) {
+function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -323,12 +363,6 @@ function SkillsPage({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <h2 className="text-sm font-semibold">Skills</h2>
-        <button onClick={onBack} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent">
-          <ArrowLeftIcon className="size-3.5" /> Back
-        </button>
-      </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {skills.length === 0 && (
           <p className="px-2 py-4 text-xs text-muted-foreground">
@@ -382,26 +416,150 @@ function SkillsPage({ onBack }: { onBack: () => void }) {
 // ════════════════════════════════════════════════════════════════════════════
 // Settings
 // ════════════════════════════════════════════════════════════════════════════
-interface AgentStatus { installed: boolean; missing: string[] }
+interface AgentStatus { installed: boolean; missing: string[]; connectable?: boolean }
 interface InstallState { agentId: string | null; log: string[]; error: string | null }
 
-/**
- * Agent picker installer: checks which agent CLIs are on PATH and runs the
- * in-app installer (via the daemon) — no terminal needed.
- */
-function AgentStatusSection() {
+/** Scan which agent harnesses are installed / connectable (from the daemon). */
+function useAgentScan() {
   const [status, setStatus] = useState<Record<string, AgentStatus>>({});
+  const [mcpPath, setMcpPath] = useState('');
+  useEffect(() => {
+    const onMsg = (msg: any) => {
+      const p = msg?.kind === 'ACP_UPDATE' ? msg.payload : null;
+      if (p?.type !== 'acp/agentStatus') return;
+      const m: Record<string, AgentStatus> = {};
+      for (const st of p.status) {
+        m[st.id] = { installed: !!st.installed, missing: st.missing ?? [], connectable: !!st.connectable };
+      }
+      setStatus(m);
+      if (p.mcpPath) setMcpPath(p.mcpPath);
+    };
+    chrome.runtime.onMessage.addListener(onMsg);
+    acp({ type: 'acp/agentStatus' });
+    return () => chrome.runtime.onMessage.removeListener(onMsg);
+  }, []);
+  return { status, mcpPath };
+}
+
+/** A titled settings block. */
+function Section({ title, note, right, children }: {
+  title: string; note?: string; right?: ReactNode; children: ReactNode;
+}) {
+  return (
+    <section className="border-b py-4 last:border-b-0">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h3 className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">{title}</h3>
+        {right}
+      </div>
+      {note && <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">{note}</p>}
+      {children}
+    </section>
+  );
+}
+
+/**
+ * One-click offer (top of the home view) to register this browser MCP with the
+ * other agents installed on the machine — no copy-paste. Dismissible; the
+ * Settings page keeps the same action plus the raw commands.
+ */
+function ConnectBanner() {
+  const [hidden, setHidden] = useState(true);
+  const { status } = useAgentScan();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+
+  useEffect(() => {
+    chrome.storage.local
+      .get('pilot.connectNoticeDismissed')
+      .then((r) => setHidden(!!r['pilot.connectNoticeDismissed']))
+      .catch(() => setHidden(false));
+    const onMsg = (msg: any) => {
+      const p = msg?.kind === 'ACP_UPDATE' ? msg.payload : null;
+      if (p?.type === 'acp/connectResult' && p.ok) {
+        setBusy(null);
+        setDone(AGENTS.find((a) => a.id === p.agentId)?.label ?? p.agentId);
+        setTimeout(() => dismiss(), 4000);
+      }
+    };
+    chrome.runtime.onMessage.addListener(onMsg);
+    return () => chrome.runtime.onMessage.removeListener(onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function dismiss() {
+    setHidden(true);
+    chrome.storage.local.set({ 'pilot.connectNoticeDismissed': true }).catch(() => {});
+  }
+
+  if (hidden) return null;
+  const candidates = AGENTS.filter(
+    (a) => a.id !== 'custom' && status[a.id]?.installed && status[a.id]?.connectable,
+  );
+  if (candidates.length === 0) return null;
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px]">
+      <span className="min-w-0 flex-1 text-muted-foreground">
+        {done ? `✓ ${done} connected — restart it to load the browser tools.` : 'Let other agents drive this browser too:'}
+      </span>
+      {!done &&
+        candidates.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            disabled={busy !== null}
+            onClick={() => { setBusy(c.id); acp({ type: 'acp/connectAgent', agentId: c.id }); }}
+            className="shrink-0 cursor-pointer rounded border bg-card px-2 py-0.5 hover:text-foreground disabled:opacity-50"
+          >
+            {busy === c.id ? 'Connecting…' : `Connect ${c.label}`}
+          </button>
+        ))}
+      <button
+        type="button"
+        onClick={dismiss}
+        aria-label="Dismiss"
+        className="shrink-0 cursor-pointer px-1 text-muted-foreground hover:text-foreground"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        }).catch(() => {});
+      }}
+      className="shrink-0 cursor-pointer rounded border bg-card px-1.5 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+    >
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  );
+}
+
+function SettingsPage({ bridge }: { bridge: boolean }) {
+  const s = useSettings((st) => st.settings);
+  const update = useSettings((st) => st.update);
+  const { status, mcpPath } = useAgentScan();
+
   const [inst, setInst] = useState<InstallState>({ agentId: null, log: [], error: null });
+  const [connectBusy, setConnectBusy] = useState<string | null>(null);
+  const [connected, setConnected] = useState<string | null>(null);
+  const [showAllAgents, setShowAllAgents] = useState(false);
+  const [showCommands, setShowCommands] = useState(false);
 
   useEffect(() => {
     const onMsg = (msg: any) => {
       const p = msg?.kind === 'ACP_UPDATE' ? msg.payload : null;
       if (!p) return;
-      if (p.type === 'acp/agentStatus') {
-        const m: Record<string, AgentStatus> = {};
-        for (const s of p.status) m[s.id] = { installed: !!s.installed, missing: s.missing ?? [] };
-        setStatus(m);
-      } else if (p.type === 'acp/installStarted') {
+      if (p.type === 'acp/installStarted') {
         setInst({ agentId: p.agentId, log: [], error: null });
       } else if (p.type === 'acp/installLog') {
         setInst((prev) => (prev.agentId === p.agentId ? { ...prev, log: [...prev.log, p.line] } : prev));
@@ -411,60 +569,15 @@ function AgentStatusSection() {
           agentId: null,
           error: p.ok ? null : (p.error ?? `"${p.agentId}" install failed — see log above.`),
         }));
+      } else if (p.type === 'acp/connectResult') {
+        setConnectBusy(null);
+        if (p.ok) setConnected(AGENTS.find((a) => a.id === p.agentId)?.label ?? p.agentId);
+        else setInst((prev) => ({ ...prev, error: p.output || `Could not connect ${p.agentId}.` }));
       }
     };
     chrome.runtime.onMessage.addListener(onMsg);
-    acp({ type: 'acp/agentStatus' });
     return () => chrome.runtime.onMessage.removeListener(onMsg);
   }, []);
-
-  const agents = AGENTS.filter((a) => a.id !== 'claude' && a.id !== 'custom');
-
-  return (
-    <section className="mb-6">
-      <label className="mb-1 block text-xs font-medium">Installed agents</label>
-      <div className="space-y-1">
-        {agents.map((a) => {
-          const st = status[a.id];
-          const busy = inst.agentId === a.id;
-          return (
-            <div key={a.id} className="flex items-center justify-between gap-2 rounded-md border bg-card px-2 py-1.5 text-xs">
-              <span className="flex min-w-0 items-center gap-2">
-                <span className={st ? (st.installed ? 'text-emerald-500' : 'text-amber-500') : 'opacity-40'}>
-                  {st ? (st.installed ? '✓' : '·') : '·'}
-                </span>
-                <span className="truncate">{a.label}</span>
-              </span>
-              {busy ? (
-                <span className="shrink-0 text-muted-foreground">installing…</span>
-              ) : st && !st.installed ? (
-                <button
-                  type="button"
-                  onClick={() => acp({ type: 'acp/installAgent', agentId: a.id })}
-                  className="shrink-0 cursor-pointer rounded bg-primary px-2 py-0.5 text-primary-foreground hover:opacity-90"
-                >
-                  Install
-                </button>
-              ) : (
-                <span className="shrink-0 text-[10px] text-muted-foreground">installed</span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {inst.agentId && inst.log.length > 0 && (
-        <pre className="mt-2 max-h-32 overflow-auto rounded-md border bg-muted p-2 text-[10px] whitespace-pre-wrap">
-          {inst.log.join('')}
-        </pre>
-      )}
-      {inst.error && <p className="mt-2 text-xs text-destructive">{inst.error}</p>}
-    </section>
-  );
-}
-
-function SettingsPage({ bridge, onBack }: { bridge: boolean; onBack: () => void }) {
-  const s = useSettings((st) => st.settings);
-  const update = useSettings((st) => st.update);
 
   const apply = (patch: Parameters<typeof update>[0]) => {
     void update(patch);
@@ -474,22 +587,30 @@ function SettingsPage({ bridge, onBack }: { bridge: boolean; onBack: () => void 
   if (!s) return null;
   const active = AGENTS.find((a) => a.id === s.agentId);
 
-  return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
-      <h2 className="mb-4 text-sm font-semibold">Settings</h2>
+  const installedAgents = AGENTS.filter((a) => a.id !== 'custom' && status[a.id]?.installed);
+  const otherAgents = AGENTS.filter((a) => a.id !== 'custom' && status[a.id] && !status[a.id]!.installed);
+  const connectable = AGENTS.filter(
+    (a) => a.id !== 'custom' && status[a.id]?.installed && status[a.id]?.connectable,
+  );
+  const commands: Array<[string, string]> = mcpPath
+    ? [
+        ['Claude Code', `claude mcp add pilot --scope user -- node "${mcpPath}"`],
+        ['Codex', `codex mcp add pilot -- node "${mcpPath}"`],
+        ['OpenCode', `opencode mcp add pilot -- node "${mcpPath}"`],
+      ]
+    : [];
 
-      <section className="mb-6">
-        <label className="mb-1 block text-xs font-medium">Agent</label>
-        <select
-          value={s.agentId}
-          onChange={(e) => apply({ agentId: e.target.value as AgentId })}
-          className="h-9 w-full rounded-md border bg-card px-2 text-sm"
-        >
+  const selectCls = 'h-9 w-full rounded-md border bg-card px-2 text-sm';
+  const inputCls = 'h-8 w-full rounded-md border bg-card px-2 text-sm';
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4">
+      {/* ── Agent ───────────────────────────────────────────────── */}
+      <Section title="Agent" note="Changing the agent starts a fresh conversation.">
+        <select value={s.agentId} onChange={(e) => apply({ agentId: e.target.value as AgentId })} className={selectCls}>
           {AGENTS.map((a) => (<option key={a.id} value={a.id}>{a.label}</option>))}
         </select>
         {active && <p className="mt-1.5 text-xs text-muted-foreground">{active.hint}</p>}
-
-        <AgentStatusSection />
 
         {s.agentId === 'custom' && (
           <div className="mt-3 space-y-2">
@@ -497,144 +618,224 @@ function SettingsPage({ bridge, onBack }: { bridge: boolean; onBack: () => void 
               value={s.customCmd}
               onChange={(e) => apply({ customCmd: e.target.value })}
               placeholder="Command (e.g. npx)"
-              className="h-8 w-full rounded-md border bg-card px-2 text-sm"
+              className={inputCls}
             />
             <input
               value={s.customArgs}
               onChange={(e) => apply({ customArgs: e.target.value })}
               placeholder="Args (e.g. -y some-acp-agent --stdio)"
-              className="h-8 w-full rounded-md border bg-card px-2 font-mono text-xs"
+              className={`${inputCls} font-mono text-xs`}
             />
-            <p className="text-xs text-muted-foreground">
-              Any ACP agent that speaks stdio. To drive the page it must support client MCP servers in <code>session/new</code>.
-            </p>
           </div>
         )}
-        <p className="mt-2 text-xs text-muted-foreground">Changing the agent starts a fresh conversation.</p>
-      </section>
 
-      <section className="mb-6">
-        <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
-          <input
-            type="checkbox"
-            checked={s.byoEnabled}
-            onChange={(e) => apply({ byoEnabled: e.target.checked })}
-          />
+        {s.agentId === 'claude' && (
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-muted-foreground">Model</span>
+              <select value={s.model} onChange={(e) => apply({ model: e.target.value })} className={selectCls}>
+                {CLAUDE_MODELS.map((m) => (<option key={m.id} value={m.id}>{m.label}</option>))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-muted-foreground">Reasoning effort</span>
+              <select
+                value={s.effort}
+                onChange={(e) => apply({ effort: e.target.value as 'low' | 'medium' | 'high' })}
+                className={selectCls}
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+          </div>
+        )}
+      </Section>
+
+      {/* ── BYO model / key ─────────────────────────────────────── */}
+      <Section title="Model & API key">
+        <label className="flex cursor-pointer items-center gap-2 text-sm">
+          <input type="checkbox" checked={s.byoEnabled} onChange={(e) => apply({ byoEnabled: e.target.checked })} />
           Bring your own model / API key
         </label>
         {s.byoEnabled && (
           <div className="mt-2 space-y-3">
-            <div>
-              <label className="mb-1 block text-xs font-medium">Provider</label>
-              <select
-                value={s.byoProvider}
-                onChange={(e) => apply({ byoProvider: e.target.value })}
-                className="h-9 w-full rounded-md border bg-card px-2 text-sm"
-              >
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-muted-foreground">Provider</span>
+              <select value={s.byoProvider} onChange={(e) => apply({ byoProvider: e.target.value })} className={selectCls}>
                 {Object.keys(BYO_ENV_KEY).map((p) => (<option key={p} value={p}>{p}</option>))}
               </select>
-            </div>
+            </label>
             {AGENT_CAPS[s.agentId].byoFlags && (
-              <div>
-                <label className="mb-1 block text-xs font-medium">Model</label>
+              <label className="block">
+                <span className="mb-1 block text-[11px] text-muted-foreground">Model</span>
                 <input
                   value={s.byoModel}
                   onChange={(e) => apply({ byoModel: e.target.value })}
-                  placeholder="e.g. openrouter/gpt-5.4 / qwen3.5-plus"
-                  className="h-8 w-full rounded-md border bg-card px-2 text-xs"
+                  placeholder="e.g. openrouter/gpt-5.4"
+                  className={inputCls}
                 />
-              </div>
+              </label>
             )}
-            <div>
-              <label className="mb-1 block text-xs font-medium">API key</label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-muted-foreground">API key</span>
               <input
                 type="password"
                 value={s.byoApiKey}
                 onChange={(e) => apply({ byoApiKey: e.target.value })}
                 placeholder={BYO_ENV_KEY[s.byoProvider] || 'provider key'}
-                className="h-8 w-full rounded-md border bg-card px-2 font-mono text-xs"
+                className={`${inputCls} font-mono text-xs`}
               />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium">Base URL (optional — proxy/router)</label>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-muted-foreground">Base URL (optional)</span>
               <input
                 value={s.byoBaseUrl}
                 onChange={(e) => apply({ byoBaseUrl: e.target.value })}
                 placeholder="https://api.your-provider.example/v1"
-                className="h-8 w-full rounded-md border bg-card px-2 font-mono text-xs"
+                className={`${inputCls} font-mono text-xs`}
               />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Injected into the agent as <code>{BYO_ENV_KEY[s.byoProvider] || 'your provider env'}</code>
-              {s.byoBaseUrl && BYO_BASE_URL_ENV[s.byoProvider] ? <> and <code>{BYO_BASE_URL_ENV[s.byoProvider]}</code></> : ''}.
-              Works with Pi, OpenCode, Qwen, Kimi, Claude, Gemini. Key stays in this browser (not encrypted).
+            </label>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Injected into the agent as <code>{BYO_ENV_KEY[s.byoProvider] || 'your provider env'}</code>. Key stays in this browser (not encrypted).
             </p>
           </div>
         )}
-      </section>
+      </Section>
 
-      {s.agentId === 'claude' && (
-        <section className="mb-6">
-          <label className="mb-1 block text-xs font-medium">Model</label>
-          <select
-            value={s.model}
-            onChange={(e) => apply({ model: e.target.value })}
-            className="h-9 w-full rounded-md border bg-card px-2 text-sm"
+      {/* ── Agents on this machine ──────────────────────────────── */}
+      <Section
+        title="Agents on this machine"
+        right={
+          <button
+            type="button"
+            onClick={() => setShowAllAgents((v) => !v)}
+            className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground"
           >
-            {CLAUDE_MODELS.map((m) => (<option key={m.id} value={m.id}>{m.label}</option>))}
-          </select>
-          <label className="mb-1 mt-3 block text-xs font-medium">Reasoning effort</label>
-          <select
-            value={s.effort}
-            onChange={(e) => apply({ effort: e.target.value as 'low' | 'medium' | 'high' })}
-            className="h-9 w-full rounded-md border bg-card px-2 text-sm"
-          >
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-          </select>
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            Controls reasoning depth (Claude's effort setting). Higher = deeper reasoning, slower.
+            {showAllAgents ? 'Hide' : 'Install more'}
+          </button>
+        }
+      >
+        <div className="space-y-1">
+          {(showAllAgents ? [...installedAgents, ...otherAgents] : installedAgents).map((a) => {
+            const st = status[a.id];
+            const busy = inst.agentId === a.id;
+            return (
+              <div key={a.id} className="flex items-center justify-between gap-2 rounded-md border bg-card px-2 py-1.5 text-xs">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className={st?.installed ? 'text-emerald-500' : 'text-amber-500'}>
+                    {st?.installed ? '✓' : '·'}
+                  </span>
+                  <span className="truncate">{a.label}</span>
+                </span>
+                {busy ? (
+                  <span className="shrink-0 text-muted-foreground">installing…</span>
+                ) : st?.installed ? (
+                  <span className="shrink-0 text-[10px] text-muted-foreground">installed</span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => acp({ type: 'acp/installAgent', agentId: a.id })}
+                    className="shrink-0 cursor-pointer rounded bg-primary px-2 py-0.5 text-primary-foreground hover:opacity-90"
+                  >
+                    Install
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {installedAgents.length === 0 && <p className="text-[11px] text-muted-foreground">Scanning…</p>}
+        </div>
+        {inst.agentId && inst.log.length > 0 && (
+          <pre className="mt-2 max-h-32 overflow-auto rounded-md border bg-muted p-2 text-[10px] whitespace-pre-wrap">
+            {inst.log.join('')}
+          </pre>
+        )}
+      </Section>
+
+      {/* ── Connect other agents ────────────────────────────────── */}
+      <Section
+        title="Connect other agents"
+        note="Let Codex / Claude Code / OpenCode drive this browser too. Then skills Pilot exports work there, and a browser launches automatically if none is open."
+      >
+        {connectable.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {connectable.map((a) => (
+              <button
+                key={a.id}
+                type="button"
+                disabled={connectBusy !== null}
+                onClick={() => { setConnectBusy(a.id); setConnected(null); acp({ type: 'acp/connectAgent', agentId: a.id }); }}
+                className="cursor-pointer rounded-md border bg-card px-2.5 py-1 text-xs hover:bg-accent disabled:opacity-50"
+              >
+                {connectBusy === a.id ? 'Connecting…' : `Connect ${a.label}`}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[11px] text-muted-foreground">No connectable agents found on this machine.</p>
+        )}
+        {connected && (
+          <p className="mt-2 text-[11px] text-emerald-600 dark:text-emerald-400">
+            ✓ {connected} connected — restart it to load the browser tools.
           </p>
-        </section>
-      )}
+        )}
 
-      <section className="mb-6">
-        <label className="mb-1 block text-xs font-medium">Page control</label>
-        <select
-          value={s.pageMode}
-          onChange={(e) => apply({ pageMode: e.target.value as 'dom' | 'cdp' })}
-          className="h-9 w-full rounded-md border bg-card px-2 text-sm"
-        >
-          <option value="cdp">CDP (default) — native, like Claude in Chrome</option>
-          <option value="dom">DOM — banner-free, content script</option>
+        {commands.length > 0 && (
+          <>
+            <button
+              type="button"
+              onClick={() => setShowCommands((v) => !v)}
+              className="mt-2 cursor-pointer text-[11px] text-muted-foreground underline hover:text-foreground"
+            >
+              {showCommands ? 'Hide commands' : 'Copy commands instead'}
+            </button>
+            {showCommands && (
+              <div className="mt-2 space-y-2">
+                {commands.map(([label, cmd]) => (
+                  <div key={label}>
+                    <div className="mb-0.5 text-[10px] tracking-wide text-muted-foreground uppercase">{label}</div>
+                    <div className="flex items-start gap-1">
+                      <code className="min-w-0 flex-1 rounded bg-muted px-1.5 py-1 text-[10px] break-all">{cmd}</code>
+                      <CopyButton text={cmd} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </Section>
+
+      {/* ── Page control ────────────────────────────────────────── */}
+      <Section
+        title="Page control"
+        note={s.pageMode === 'cdp'
+          ? 'Native accessibility tree via the debugger (shows the "Pilot is debugging this browser" banner) — like Claude in Chrome.'
+          : 'Reads the page through the content script — no debugger banner, but less detail.'}
+      >
+        <select value={s.pageMode} onChange={(e) => apply({ pageMode: e.target.value as 'dom' | 'cdp' })} className={selectCls}>
+          <option value="cdp">CDP — native, like Claude in Chrome</option>
+          <option value="dom">DOM — banner-free</option>
         </select>
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          CDP (default) attaches the debugger and shows a "Pilot is debugging this browser"
-          banner while active — the same model Claude in Chrome uses, with a real accessibility
-          tree. DOM reads the page via the content script instead (no banner, less detail).
-        </p>
-        <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={s.autoScreenshot}
-            onChange={(e) => apply({ autoScreenshot: e.target.checked })}
-          />
-          Send a viewport screenshot with each message (DOM mode only)
-        </label>
-      </section>
+        {s.pageMode === 'dom' && (
+          <label className="mt-2 flex cursor-pointer items-center gap-2 text-sm">
+            <input type="checkbox" checked={s.autoScreenshot} onChange={(e) => apply({ autoScreenshot: e.target.checked })} />
+            Send a viewport screenshot with each message
+          </label>
+        )}
+      </Section>
 
-      <section className="mb-6">
-        <label className="mb-1 block text-xs font-medium">Connection</label>
+      {/* ── Connection ──────────────────────────────────────────── */}
+      <Section title="Connection">
         <div className="flex items-center gap-2 text-sm">
           <span className={cn('inline-block h-2.5 w-2.5 rounded-full', bridge ? 'bg-emerald-500' : 'bg-muted-foreground/40')} />
           {bridge ? 'Connected to the local agent bridge' : 'Offline — is the daemon running?'}
         </div>
-      </section>
+      </Section>
 
-      <button onClick={onBack} className="mt-auto self-start rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
-        Back to chat
-      </button>
+      {inst.error && <p className="py-2 text-xs text-destructive">{inst.error}</p>}
     </div>
   );
 }

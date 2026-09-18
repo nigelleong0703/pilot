@@ -114,7 +114,7 @@ export const acpAdapter: ChatModelAdapter = {
       if (!sessionId) {
         if (resumeTarget) {
           // Resume a past chat in the current agent process.
-          acp({ type: 'acp/resumeSession', sessionId: resumeTarget });
+          acp({ type: 'acp/resumeSession', sessionId: resumeTarget, agentId: s.agentId, model: s.model, effort: s.effort });
           for (;;) {
             if (!queue.length) await wait();
             let err: string | null = null;

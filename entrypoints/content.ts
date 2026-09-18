@@ -1,6 +1,7 @@
 import { defineContentScript } from 'wxt/sandbox';
 import type { RecordedStep } from './background';
 import type { PageCommand, SnapshotNode } from '../lib/protocol';
+import { paintAgentCursor, paintAgentFrame, clearAgentFrame } from '../lib/overlay';
 
 export default defineContentScript({
   matches: ['<all_urls>'],
@@ -86,12 +87,17 @@ export default defineContentScript({
       return parts.join(' > ');
     }
 
-    function baseStep(el: Element): Pick<RecordedStep, 'label' | 'selector' | 'url' | 'ts'> {
+    function baseStep(el: Element): Pick<RecordedStep, 'label' | 'selector' | 'url' | 'ts' | 'rect' | 'viewport'> {
+      const r = el.getBoundingClientRect();
       return {
         label: semanticLabel(el),
         selector: cssSelector(el),
         url: location.href,
         ts: Date.now(),
+        // Viewport-relative box + viewport size so the panel can crop the
+        // screenshot down to "where the user clicked".
+        rect: { x: r.left, y: r.top, width: r.width, height: r.height },
+        viewport: { w: window.innerWidth, h: window.innerHeight },
       };
     }
 
@@ -301,6 +307,12 @@ export default defineContentScript({
       setTimeout(() => (el.style.outline = prev), 600);
     }
 
+    /** Cursor + glow over the element the agent is acting on (both page modes). */
+    function actCursor(el: HTMLElement, kind: 'click' | 'type' | 'select') {
+      const r = el.getBoundingClientRect();
+      paintAgentCursor({ x: r.left, y: r.top, width: r.width, height: r.height }, kind);
+    }
+
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     async function handleCommand(cmd: PageCommand): Promise<unknown> {
@@ -333,6 +345,7 @@ export default defineContentScript({
           clearOverlays();
           el.scrollIntoView({ block: 'center' });
           flash(el);
+          actCursor(el, 'click');
           el.click();
           return { clicked: semanticLabel(el) };
         }
@@ -342,6 +355,7 @@ export default defineContentScript({
           if (!el) throw new Error('Element not found for type');
           clearOverlays();
           flash(el);
+          actCursor(el, 'type');
           el.focus();
           const text = String(params.text ?? '');
           el.value = text;
@@ -372,6 +386,7 @@ export default defineContentScript({
           }
           clearOverlays();
           flash(el);
+          actCursor(el, 'select');
           el.focus();
           el.value = option.value;
           el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -401,6 +416,12 @@ export default defineContentScript({
     setInterval(emitNavigate, 700); // catches pushState/replaceState SPA routes
 
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      if (msg?.kind === 'AGENT_ACTIVE') {
+        // Whole-page glow while the agent controls the tab.
+        if (msg.off) clearAgentFrame();
+        else paintAgentFrame(Number(msg.ms) || 6000);
+        return;
+      }
       if (msg?.kind === 'RECORDING_STATE') {
         tabRecording = Boolean(msg.recording);
         showBanner(tabRecording);

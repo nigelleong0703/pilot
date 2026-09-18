@@ -8,52 +8,37 @@
  *   click    -> DOM.getBoxModel + Input.dispatchMouseEvent (real mouse events)
  *   type     -> DOM.focus + Input.insertText
  */
+import { paintAgentCursor } from './overlay';
+
 const VERSION = '1.3';
 const attached = new Set<number>();
-const overlayReady = new Set<number>();
 /** tabId -> (ref -> backendDOMNodeId) from the last snapshot. */
 const refMaps = new Map<number, Map<number, number>>();
 
 chrome.debugger?.onDetach.addListener((src) => {
-  if (src.tabId != null) { attached.delete(src.tabId); overlayReady.delete(src.tabId); }
+  if (src.tabId != null) attached.delete(src.tabId);
 });
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-// Agent-action highlight (à la Claude in Chrome / Operator): briefly box the
-// element the agent is about to click/type/select using CDP's native Overlay,
-// so the user can see what Pilot is doing on the page.
 type ActionKind = 'click' | 'type' | 'select';
-const ACTION_RGB: Record<ActionKind, [number, number, number]> = {
-  click: [37, 99, 235],   // blue
-  type: [22, 163, 74],    // green
-  select: [217, 119, 6],  // amber
-};
 
-async function ensureOverlay(tabId: number): Promise<void> {
-  if (overlayReady.has(tabId)) return;
-  await send(tabId, 'Overlay.enable').catch(() => {});
-  overlayReady.add(tabId);
-}
+/**
+ * Agent-action visual (à la Claude in Chrome / Operator): an on-page cursor
+ * glides to the element and clicks, with a glowing halo around the target. It's
+ * injected into the page (not CDP's native Overlay) so it's visible and also
+ * shows up in screenshots. Uses the self-contained paintAgentCursor source so
+ * the CDP and content-script paths render it identically. Colors: click=blue,
+ * type=green, select=amber.
+ */
+const OVERLAY_FN = `(${paintAgentCursor.toString()})`;
 
-export async function highlightNode(tabId: number, backendNodeId: number, kind: ActionKind): Promise<void> {
-  const rgb = ACTION_RGB[kind];
-  const c = (a: number) => ({ r: rgb[0], g: rgb[1], b: rgb[2], a });
-  await ensureOverlay(tabId);
-  await send(tabId, 'Overlay.highlightNode', {
-    backendNodeId,
-    highlightConfig: {
-      showInfo: true,
-      contentColor: c(0.18),
-      borderColor: c(0.9),
-      paddingColor: c(0.12),
-    },
+async function showCursor(tabId: number, box: { x: number; y: number; width: number; height: number }, kind: ActionKind): Promise<void> {
+  await send(tabId, 'Runtime.evaluate', {
+    expression: `${OVERLAY_FN}(${JSON.stringify(box)},${JSON.stringify(kind)})`,
   }).catch(() => {});
 }
 
-export function hideHighlight(tabId: number): void {
-  void send(tabId, 'Overlay.hideHighlight').catch(() => {});
-}
 
 function send(tabId: number, method: string, params?: object, timeoutMs = 8000): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -91,7 +76,6 @@ export function detach(tabId: number) {
   if (!attached.has(tabId)) return;
   chrome.debugger.detach({ tabId }, () => void chrome.runtime.lastError);
   attached.delete(tabId);
-  overlayReady.delete(tabId);
 }
 
 const INTERACTIVE = new Set([
@@ -147,7 +131,7 @@ async function resolveBackend(tabId: number, params: Record<string, unknown>): P
   throw new Error('need ref or selector');
 }
 
-async function centerOf(tabId: number, backendNodeId: number): Promise<{ x: number; y: number; objectId?: string }> {
+async function centerOf(tabId: number, backendNodeId: number): Promise<{ x: number; y: number; box: { x: number; y: number; width: number; height: number }; objectId?: string }> {
   const { object } = await send(tabId, 'DOM.resolveNode', { backendNodeId });
   if (object?.objectId) {
     await send(tabId, 'Runtime.callFunctionOn', {
@@ -158,29 +142,37 @@ async function centerOf(tabId: number, backendNodeId: number): Promise<{ x: numb
   const box = await send(tabId, 'DOM.getBoxModel', { backendNodeId });
   const q = box?.model?.content as number[] | undefined;
   if (!q) throw new Error('element has no box (not visible)');
-  return { x: (q[0]! + q[2]! + q[4]! + q[6]!) / 4, y: (q[1]! + q[3]! + q[5]! + q[7]!) / 4, objectId: object?.objectId };
+  const xs = [q[0]!, q[2]!, q[4]!, q[6]!];
+  const ys = [q[1]!, q[3]!, q[5]!, q[7]!];
+  const x0 = Math.min(...xs), y0 = Math.min(...ys);
+  const x1 = Math.max(...xs), y1 = Math.max(...ys);
+  return {
+    x: (x0 + x1) / 2,
+    y: (y0 + y1) / 2,
+    box: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+    objectId: object?.objectId,
+  };
 }
 
 export async function cdpClick(tabId: number, params: Record<string, unknown>): Promise<unknown> {
   await ensureAttached(tabId);
   const backend = await resolveBackend(tabId, params);
-  const { x, y } = await centerOf(tabId, backend);
-  await highlightNode(tabId, backend, 'click');
-  await sleep(160);
+  const { x, y, box } = await centerOf(tabId, backend);
+  await showCursor(tabId, box, 'click');
+  await sleep(300); // let the on-page cursor glide to the target first
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-  await sleep(600);
-  hideHighlight(tabId);
+  await sleep(500);
   return { clicked: params.ref ?? params.selector };
 }
 
 export async function cdpType(tabId: number, params: Record<string, unknown>): Promise<unknown> {
   await ensureAttached(tabId);
   const backend = await resolveBackend(tabId, params);
-  const { objectId } = await centerOf(tabId, backend);
-  await highlightNode(tabId, backend, 'type');
-  await sleep(160);
+  const { box, objectId } = await centerOf(tabId, backend);
+  await showCursor(tabId, box, 'type');
+  await sleep(300);
   if (objectId) {
     await send(tabId, 'Runtime.callFunctionOn', {
       objectId,
@@ -193,16 +185,16 @@ export async function cdpType(tabId: number, params: Record<string, unknown>): P
       await send(tabId, 'Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
     }
   }
-  await sleep(600);
-  hideHighlight(tabId);
+  await sleep(400);
   return { typed: params.text };
 }
 
 export async function cdpSelectOption(tabId: number, params: Record<string, unknown>): Promise<unknown> {
   await ensureAttached(tabId);
   const backend = await resolveBackend(tabId, params);
-  await highlightNode(tabId, backend, 'select');
-  await sleep(160);
+  const { box } = await centerOf(tabId, backend);
+  await showCursor(tabId, box, 'select');
+  await sleep(300);
   const { object } = await send(tabId, 'DOM.resolveNode', { backendNodeId: backend });
   if (!object?.objectId) throw new Error('select not found');
   const r = await send(tabId, 'Runtime.callFunctionOn', {
@@ -212,8 +204,7 @@ export async function cdpSelectOption(tabId: number, params: Record<string, unkn
     arguments: [{ value: String(params.text ?? '') }],
     returnByValue: true,
   });
-  await sleep(600);
-  hideHighlight(tabId);
+  await sleep(400);
   return { selected: r?.result?.value };
 }
 

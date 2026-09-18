@@ -29,7 +29,12 @@ export function RecordButton() {
       aria-label={recording ? 'Stop recording' : 'Record'}
       onClick={() => chrome.runtime.sendMessage({ type: recording ? 'STOP' : 'START' }).catch(() => {})}
     >
-      <span className={cn('inline-block size-3 rounded-full bg-current', recording && 'animate-pulse')} />
+      <span
+        className={cn(
+          'inline-block size-3 bg-current',
+          recording ? 'rounded-[2px]' : 'rounded-full',
+        )}
+      />
     </TooltipIconButton>
   );
 }

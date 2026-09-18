@@ -15,6 +15,10 @@ export interface RecordedStep {
   url: string;
   ts: number;
   screenshot?: string;
+  /** Element box at action time (viewport CSS px) — used to crop the thumbnail. */
+  rect?: { x: number; y: number; width: number; height: number };
+  /** Viewport size at action time (CSS px). */
+  viewport?: { w: number; h: number };
 }
 
 type UiMessage =
@@ -32,8 +36,6 @@ export default defineBackground(() => {
   let nextId = 1;
   let bridgeConnected = false;
   let promptMessage = '';
-
-  const POST_ACTION_DELAY_MS = 500;
 
   function updateBadge() {
     const action = chrome.action;
@@ -91,6 +93,24 @@ export default defineBackground(() => {
     }
   }
 
+  // captureVisibleTab is throttled (~2/s), so grab each step's shot as soon as
+  // possible after the action (pre-navigation = "where I clicked") and skip if
+  // we just captured or one is in flight.
+  let lastShotAt = 0;
+  let shotInFlight = false;
+  async function captureStepScreenshot(step: RecordedStep, windowId?: number): Promise<void> {
+    if (windowId == null) return;
+    if (shotInFlight || Date.now() - lastShotAt < 500) return;
+    shotInFlight = true;
+    try {
+      const shot = await captureScreenshot(windowId);
+      if (shot) { step.screenshot = shot; broadcastState(); }
+    } finally {
+      lastShotAt = Date.now();
+      shotInFlight = false;
+    }
+  }
+
   function broadcastState() {
     chrome.runtime
       .sendMessage({ type: 'STATE', isRecording, steps: recordedEvents, bridgeConnected, promptMessage })
@@ -132,6 +152,19 @@ export default defineBackground(() => {
   /** Diagnostic log line → offscreen → daemon (~/.pilot/daemon.log). */
   function bglog(msg: string) {
     chrome.runtime.sendMessage({ kind: 'ACP_SEND', payload: { type: 'acp/log', msg } }).catch(() => {});
+  }
+
+  // Whole-page glow while the agent is operating the tab. Each browser command
+  // refreshes it; it fades out ~6s after the last one (and is cleared when the
+  // side-panel turn unpins its tab).
+  const AGENT_FRAME_MS = 6000;
+  function pingAgentActive(tabId?: number | null) {
+    if (tabId == null) return;
+    chrome.tabs.sendMessage(tabId, { kind: 'AGENT_ACTIVE', ms: AGENT_FRAME_MS }).catch(() => {});
+  }
+  function clearAgentActive(tabId?: number | null) {
+    if (tabId == null) return;
+    chrome.tabs.sendMessage(tabId, { kind: 'AGENT_ACTIVE', off: true }).catch(() => {});
   }
 
   ensureOffscreen();
@@ -328,8 +361,16 @@ export default defineBackground(() => {
     return getActiveTab();
   }
 
+  const PAGE_METHODS = new Set([
+    'navigate', 'snapshot', 'click', 'type', 'selectOption', 'getText', 'screenshot',
+  ]);
+
   async function dispatch(req: BridgeRequest): Promise<unknown> {
     const p = req.params ?? {};
+    // Any page action shows the whole-page "agent is controlling this tab" glow.
+    if (PAGE_METHODS.has(req.method)) {
+      resolveTab(p).then((t) => pingAgentActive(t.id)).catch(() => {});
+    }
     switch (req.method) {
       case 'listTabs': {
         // Multi-tab workflows: tabs the user (or the agent) has placed in the
@@ -342,6 +383,7 @@ export default defineBackground(() => {
         await chrome.tabs.update(tab.id!, { url: String(p.url) });
         await waitForTabComplete(tab.id!);
         await ensureContentScript(tab.id!);
+        pingAgentActive(tab.id); // content script reloaded with the page
         return { navigatedTo: p.url, tabId: tab.id };
       }
       case 'pageContext': {
@@ -438,6 +480,7 @@ export default defineBackground(() => {
       return true; // async response
     }
     if ((message as { type?: string }).type === 'UNPIN_TAB') {
+      clearAgentActive(pinnedTabId);
       pinnedTabId = null;
       liveActiveTab().then((t) => broadcastActiveTab(t)).catch(() => {});
       return;
@@ -493,18 +536,11 @@ export default defineBackground(() => {
       if (isRecording) {
         const ev = message as PageEvent;
         const windowId = sender.tab?.windowId;
-        const tabId    = sender.tab?.id;
         const step: RecordedStep = { id: nextId++, ...ev.payload };
         recordedEvents.push(step);
         recordedEvents.sort((a, b) => a.id - b.id);
         broadcastState();
-        setTimeout(async () => {
-          if (tabId != null) {
-            try { await waitForTabComplete(tabId, 4000); } catch { /* ignore */ }
-          }
-          const screenshot = await captureScreenshot(windowId);
-          if (screenshot) { step.screenshot = screenshot; broadcastState(); }
-        }, POST_ACTION_DELAY_MS);
+        void captureStepScreenshot(step, windowId);
       }
       sendResponse({ ok: true, recording: isRecording });
       return;

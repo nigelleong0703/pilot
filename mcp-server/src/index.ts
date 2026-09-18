@@ -97,8 +97,9 @@ function ensureConnection() {
 
 ensureConnection();
 
-/** Send a command to the daemon (→ extension) and await its response. */
-function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<any> {
+/** Send a command to the daemon (→ extension) and await its response.
+ *  Generous default timeout: the first call may auto-launch a browser. */
+function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<any> {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return Promise.reject(
       new Error(

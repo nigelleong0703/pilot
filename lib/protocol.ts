@@ -44,7 +44,7 @@ export type BridgeMethod =
 /** Sent from the side panel (via offscreen) to the daemon. */
 export type AcpClientMessage =
   | { type: 'acp/newSession'; agentId?: string; cmd?: string; args?: string[]; model?: string; effort?: 'low' | 'medium' | 'high'; byo?: { enabled?: boolean; provider?: string; model?: string; apiKey?: string; baseUrl?: string } }
-  | { type: 'acp/resumeSession'; sessionId: string }
+  | { type: 'acp/resumeSession'; sessionId: string; agentId?: string; model?: string; effort?: 'low' | 'medium' | 'high' }
   | { type: 'acp/prompt'; sessionId: string; text: string; content?: unknown[] }
   | { type: 'acp/cancel'; sessionId: string }
   | { type: 'acp/permission'; requestId: number; optionId: string | null }
