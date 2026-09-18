@@ -7,23 +7,14 @@ import {
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/follow-up-suggestions";
 import { Image } from "@/components/image";
+import { ChainOfThought } from "@/components/chain-of-thought";
 import { MarkdownText } from "@/components/markdown-text";
-import {
-  Reasoning,
-  ReasoningContent,
-  ReasoningRoot,
-  ReasoningText,
-  ReasoningTrigger,
-} from "@/components/reasoning";
+import { Reasoning } from "@/components/reasoning";
 import { ToolFallback } from "@/components/tool-fallback";
-import {
-  ToolGroupContent,
-  ToolGroupRoot,
-  ToolGroupTrigger,
-} from "@/components/tool-group";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
 import { RecordButton } from "@/components/record-button";
 import { PlusMenu } from "@/components/plus-menu";
+import { ModelEffortSelector } from "@/components/model-effort-selector";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -158,34 +149,29 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         data-slot="aui_thread-viewport"
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
-        <div
-          className={cn(
-            "mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4",
-            isEmpty && "justify-center",
-          )}
-        >
-          <AuiIf condition={isNewChatView}>
-            <Welcome />
-          </AuiIf>
-          <AuiIf condition={isHistoryLoadingView}>
-            <ThreadHistorySkeleton />
-          </AuiIf>
+        <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
+          <div className="flex flex-1 flex-col">
+            <AuiIf condition={isNewChatView}>
+              <div className="flex flex-1 flex-col justify-center">
+                <Welcome />
+              </div>
+            </AuiIf>
+            <AuiIf condition={isHistoryLoadingView}>
+              <ThreadHistorySkeleton />
+            </AuiIf>
 
-          <div
-            data-slot="aui_message-group"
-            className="mb-14 flex flex-col gap-y-6 empty:hidden"
-          >
-            <ThreadPrimitive.Messages>
-              {() => <ThreadMessage />}
-            </ThreadPrimitive.Messages>
+            <div
+              data-slot="aui_message-group"
+              className="mb-14 flex flex-col gap-y-6 empty:hidden"
+            >
+              <ThreadPrimitive.Messages>
+                {() => <ThreadMessage />}
+              </ThreadPrimitive.Messages>
+            </div>
           </div>
 
           <ThreadPrimitive.ViewportFooter
-            className={cn(
-              "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
-              !isEmpty &&
-                "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
-            )}
+            className="aui-thread-viewport-footer bg-background sticky bottom-0 mt-auto flex flex-col gap-4 overflow-visible rounded-t-(--composer-radius) pb-4 md:pb-6"
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
@@ -289,6 +275,7 @@ const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <div className="flex items-center gap-1">
+        <ModelEffortSelector />
         <PlusMenu />
         <RecordButton />
       </div>
@@ -399,19 +386,20 @@ const AssistantMessage: FC = () => {
           {({ part, children }) => {
             switch (part.type) {
               case "group-chainOfThought":
-                return <div data-slot="aui_chain-of-thought">{children}</div>;
+                return (
+                  <ChainOfThought
+                    indices={part.indices}
+                    running={part.status.type === "running"}
+                  >
+                    {children}
+                  </ChainOfThought>
+                );
               case "group-tool":
                 if (ToolGroup) {
                   return <ToolGroup group={part}>{children}</ToolGroup>;
                 }
                 return (
-                  <ToolGroupRoot variant="ghost">
-                    <ToolGroupTrigger
-                      count={part.indices.length}
-                      active={part.status.type === "running"}
-                    />
-                    <ToolGroupContent>{children}</ToolGroupContent>
-                  </ToolGroupRoot>
+                  <div className="flex flex-col gap-0.5">{children}</div>
                 );
               case "group-reasoning": {
                 if (ReasoningGroup) {
@@ -419,14 +407,10 @@ const AssistantMessage: FC = () => {
                     <ReasoningGroup group={part}>{children}</ReasoningGroup>
                   );
                 }
-                const running = part.status.type === "running";
                 return (
-                  <ReasoningRoot streaming={running}>
-                    <ReasoningTrigger active={running} />
-                    <ReasoningContent aria-busy={running}>
-                      <ReasoningText>{children}</ReasoningText>
-                    </ReasoningContent>
-                  </ReasoningRoot>
+                  <div className="text-muted-foreground text-sm leading-relaxed">
+                    {children}
+                  </div>
                 );
               }
               case "text":

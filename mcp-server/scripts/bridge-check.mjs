@@ -33,8 +33,13 @@ wss.on('connection', (ws) => {
   }, 8_000);
 
   ws.on('message', (data) => {
+    let res;
+    try { res = JSON.parse(data.toString()); } catch { return; }
+    // The extension also pushes diagnostic/ACP frames over the same socket
+    // (`acp/log`, `acp/*`); only the reply with our request id is the answer.
+    if (res.id !== id) return;
+
     clearTimeout(cmdTimer);
-    const res = JSON.parse(data.toString());
     if (!res.ok) {
       console.error('[check] ⚠️  snapshot error:', res.error);
     } else {

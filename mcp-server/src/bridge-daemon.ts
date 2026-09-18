@@ -25,6 +25,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as resolvePath, join } from 'node:path';
 import { createRequire } from 'node:module';
+import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { AcpClient, type McpServerSpec, type AgentSpawn } from './acp-client.js';
@@ -69,11 +70,28 @@ function claudeSpawn(): AgentSpawn {
   }
 }
 
-/** Claude honors _meta.systemPrompt + _meta.claudeCode.options (tool isolation + model). */
-function claudeMeta(model?: string) {
-  const options: Record<string, unknown> = { allowedTools: ['mcp__browser'] };
+/**
+ * Claude honors _meta.systemPrompt + _meta.claudeCode.options.
+ *
+ * Tool isolation: `disableBuiltInTools` tells claude-code-acp to disallow EVERY
+ * built-in Claude Code tool (Bash, Edit, WebSearch, TodoWrite, Task…). This is
+ * the reliable switch — `tools: []` / `allowedTools` in claudeCode.options are
+ * overwritten by the adapter (it forces `tools: { preset: claude_code }` and
+ * derives allowedTools from fs/terminal capabilities), so we don't rely on
+ * them. The model then only ever sees the browser MCP tools — same shape as
+ * Claude in Chrome's curated browser-only toolset.
+ */
+function claudeMeta(model?: string, effort?: 'low' | 'medium' | 'high') {
+  const options: Record<string, unknown> = {
+    tools: [],
+    allowedTools: ['mcp__browser'],
+    // Reasoning depth. The old `maxThinkingTokens` is deprecated and on current
+    // models is only on/off, so we use the SDK's `effort` option instead — the
+    // same knob Claude in Chrome exposes (low/medium/high reasoning).
+    ...(effort && { effort }),
+  };
   if (model) options.model = model; // Claude Agent SDK model alias (opus/sonnet/haiku)
-  return { systemPrompt: PILOT_SYSTEM_PROMPT, claudeCode: { options } };
+  return { systemPrompt: PILOT_SYSTEM_PROMPT, disableBuiltInTools: true, claudeCode: { options } };
 }
 /** Other ACP agents: steer via systemPrompt only (claudeCode options are ignored). */
 function genericMeta() {
@@ -81,32 +99,219 @@ function genericMeta() {
 }
 
 const PILOT_SYSTEM_PROMPT =
-  'You are Pilot. You control the user\'s CURRENT browser tab through the "browser" MCP ' +
-  'server (browser_navigate, browser_snapshot, browser_click, browser_type, ' +
-  'browser_select_option, browser_get_text, browser_screenshot). Every message includes the ' +
-  'page the user is currently viewing. ALWAYS use these browser_* tools for any web browsing ' +
-  'or page interaction — never launch a separate or headless browser. Typical flow: ' +
-  'browser_snapshot -> browser_click/browser_type; browser_get_text to read the page. You can ' +
-  'also record the user\'s actions and author skills via the recorder_* tools.';
+  'You are Pilot. You control the user\'s browser through the "browser" MCP ' +
+  'server (browser_list_tabs, browser_navigate, browser_snapshot, browser_click, browser_type, ' +
+  'browser_select_option, browser_get_text, browser_screenshot). The tabs you act on live in the ' +
+  '"Pilot" tab group: browser_list_tabs lists them and each has a tabId you can pass to the other ' +
+  'tools to work across several tabs at once. Every message includes the page the user is currently ' +
+  'viewing. ' +
+  'ALWAYS use these browser_* tools for any web browsing or page interaction — never launch a ' +
+  'separate or headless browser, and do not browse the web with any other tool. These browser_* ' +
+  'tools are your ONLY tools; do not search for other tools. Typical flow: browser_snapshot -> ' +
+  'browser_click/browser_type; browser_get_text to read the page. You can also record the user\'s ' +
+  'actions and author skills via the recorder_* tools.';
 
-interface AgentDef { spawn: () => AgentSpawn; meta: () => unknown; }
+interface AgentDef { spawn: () => AgentSpawn; meta: () => unknown; mcp: boolean; }
 const AGENTS: Record<string, AgentDef> = {
-  claude: { spawn: claudeSpawn, meta: claudeMeta },
+  claude: { spawn: claudeSpawn, meta: claudeMeta, mcp: true },
   gemini: {
+    // Verified (2026-08): Gemini CLI ACP mode accepts client stdio MCP servers in
+    // session/new. `--experimental-acp` is the legacy flag; `--acp` is newer.
     spawn: () => ({ command: process.env.ACP_GEMINI_CMD ?? 'gemini', args: splitArgs(process.env.ACP_GEMINI_ARGS) .length ? splitArgs(process.env.ACP_GEMINI_ARGS) : ['--experimental-acp'], shell: win }),
     meta: genericMeta,
+    mcp: true,
   },
   codex: {
-    spawn: () => ({ command: process.env.ACP_CODEX_CMD ?? 'codex-acp', args: splitArgs(process.env.ACP_CODEX_ARGS), shell: win }),
+    // Verified (2026-08): @agentclientprotocol/codex-acp accepts client MCP servers
+    // in session/new (stdio + http). It IGNORES _meta.systemPrompt, so the Pilot
+    // instructions are passed via CODEX_CONFIG.developer_instructions instead
+    // (the channel the ai-sdk harness maps instructions to). Browser MCP is the
+    // only tool source injected; INITIAL_AGENT_MODE default 'agent' is fine.
+    spawn: () => {
+      let codexConfig: Record<string, unknown> = {};
+      if (process.env.CODEX_CONFIG) {
+        try { codexConfig = JSON.parse(process.env.CODEX_CONFIG); } catch { /* keep {} */ }
+      }
+      codexConfig.developer_instructions = PILOT_SYSTEM_PROMPT;
+      return {
+        command: process.env.ACP_CODEX_CMD ?? 'npx',
+        args: splitArgs(process.env.ACP_CODEX_ARGS).length ? splitArgs(process.env.ACP_CODEX_ARGS) : ['--yes', '@agentclientprotocol/codex-acp'],
+        shell: win,
+        env: { CODEX_CONFIG: JSON.stringify(codexConfig) },
+      };
+    },
     meta: genericMeta,
+    mcp: true,
   },
   pi: {
+    // NOT wired: pi-acp accepts mcpServers in session/new but does NOT hand them to
+    // pi (pi has no native MCP; needs the community pi-mcp-adapter extension, which
+    // reads .pi/mcp.json — not our session/new list). Passing them breaks some
+    // builds (they reject non-empty mcpServers), so we skip them for pi.
     spawn: () => ({ command: process.env.ACP_PI_CMD ?? 'pi-acp', args: splitArgs(process.env.ACP_PI_ARGS), shell: win }),
     meta: genericMeta,
+    mcp: false,
+  },
+  opencode: {
+    // Ships its own ACP (`opencode acp`) and is MCP-native, so client MCP
+    // servers in session/new should attach. BYO via standard provider env keys.
+    spawn: () => ({ command: process.env.ACP_OPENCODE_CMD ?? 'opencode', args: splitArgs(process.env.ACP_OPENCODE_ARGS).length ? splitArgs(process.env.ACP_OPENCODE_ARGS) : ['acp'], shell: win }),
+    meta: genericMeta,
+    mcp: true,
+  },
+  qwen: {
+    // Alibaba Qwen Code ships its own ACP (`qwen --acp`). BYO via provider env
+    // key + optional --provider/--model flags.
+    spawn: () => ({ command: process.env.ACP_QWEN_CMD ?? 'qwen', args: splitArgs(process.env.ACP_QWEN_ARGS).length ? splitArgs(process.env.ACP_QWEN_ARGS) : ['--acp'], shell: win }),
+    meta: genericMeta,
+    mcp: true,
+  },
+  kimi: {
+    // Moonshot Kimi CLI (`kimi acp`). BYO via MOONSHOT_API_KEY.
+    spawn: () => ({ command: process.env.ACP_KIMI_CMD ?? 'kimi', args: splitArgs(process.env.ACP_KIMI_ARGS).length ? splitArgs(process.env.ACP_KIMI_ARGS) : ['acp'], shell: win }),
+    meta: genericMeta,
+    mcp: true,
+  },
+  grok: {
+    // xAI Grok Build (`grok agent stdio`). BYO via XAI_API_KEY.
+    spawn: () => ({ command: process.env.ACP_GROK_CMD ?? 'grok', args: splitArgs(process.env.ACP_GROK_ARGS).length ? splitArgs(process.env.ACP_GROK_ARGS) : ['agent', 'stdio'], shell: win }),
+    meta: genericMeta,
+    mcp: true,
   },
 };
 function agentDef(id: string | undefined): AgentDef {
   return AGENTS[id ?? 'claude'] ?? AGENTS.claude!;
+}
+
+// ── In-app agent installer ───────────────────────────────────────────────────
+// The picker's "Install" button runs these so the user never touches a terminal.
+// Keyed by agent id; the command is what the agent's spawn needs on PATH.
+const AGENT_INSTALL: Record<string, { cmd: string; args: string[]; shell?: boolean }> = {
+  pi: { cmd: 'npm', args: ['install', '-g', 'pi-acp', '@earendil-works/pi-coding-agent'] },
+  gemini: { cmd: 'npm', args: ['install', '-g', '@google/gemini-cli'] },
+  opencode: { cmd: 'npm', args: ['install', '-g', 'opencode-ai'] },
+  qwen: { cmd: 'npm', args: ['install', '-g', '@qwen-code/qwen-code'] },
+  kimi: { cmd: 'npm', args: ['install', '-g', '@moonshot-ai/kimi-code'] },
+  grok: { cmd: 'bash', args: ['-c', 'curl -fsSL https://x.ai/cli/install.sh | bash'], shell: true },
+};
+
+/** Env override for an agent's launch command (if any). */
+const AGENT_CMD_ENV: Record<string, string> = {
+  gemini: 'ACP_GEMINI_CMD', codex: 'ACP_CODEX_CMD', pi: 'ACP_PI_CMD',
+  opencode: 'ACP_OPENCODE_CMD', qwen: 'ACP_QWEN_CMD', kimi: 'ACP_KIMI_CMD', grok: 'ACP_GROK_CMD',
+};
+
+/** The binary that must be on PATH for an agent to run (claude is bundled). */
+function agentCommand(id: string): string {
+  const env = AGENT_CMD_ENV[id];
+  if (env && process.env[env]) return process.env[env]!.trim().split(/\s+/)[0];
+  switch (id) {
+    case 'claude': return 'node'; // bundled adapter — always present
+    case 'codex': return 'npx';   // codex-acp runs via npx, so nothing extra needed
+    case 'gemini': return 'gemini';
+    case 'pi': return 'pi-acp';
+    case 'opencode': return 'opencode';
+    case 'qwen': return 'qwen';
+    case 'kimi': return 'kimi';
+    case 'grok': return 'grok';
+    default: return id;
+  }
+}
+
+function commandExists(cmd: string): boolean {
+  try {
+    const check = process.platform === 'win32' ? 'where' : 'which';
+    return spawnSync(check, [cmd], { stdio: 'ignore' }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+// ── Bring-your-own-model ───────────────────────────────────────────────────
+// Settings from the side panel (provider/model/key/baseUrl) are applied to the
+// spawned agent: the API key is injected under the provider's standard env var,
+// an optional base URL maps to the provider's base-url env var, and CLIs that
+// take --provider/--model flags get them appended.
+export interface ByoConfig {
+  enabled?: boolean;
+  provider?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+const BYO_ENV_KEY: Record<string, string> = {
+  openai: 'OPENAI_API_KEY',
+  anthropic: 'ANTHROPIC_API_KEY',
+  google: 'GEMINI_API_KEY',
+  openrouter: 'OPENROUTER_API_KEY',
+  deepseek: 'DEEPSEEK_API_KEY',
+  groq: 'GROQ_API_KEY',
+  mistral: 'MISTRAL_API_KEY',
+  xai: 'XAI_API_KEY',
+  moonshot: 'MOONSHOT_API_KEY',
+  grok: 'XAI_API_KEY',
+  qwen: 'DASHSCOPE_API_KEY',
+  ollama: '',
+  local: '',
+  custom: '',
+};
+
+const BYO_BASE_URL_ENV: Record<string, string> = {
+  openai: 'OPENAI_BASE_URL',
+  anthropic: 'ANTHROPIC_BASE_URL',
+  google: 'GEMINI_BASE_URL',
+  openrouter: 'OPENROUTER_BASE_URL',
+  deepseek: 'DEEPSEEK_BASE_URL',
+};
+
+/** Env injected into the agent process from a BYO config. */
+function byoEnv(byo: ByoConfig): Record<string, string> {
+  const env: Record<string, string> = {};
+  const p = (byo.provider ?? '').trim();
+  if (byo.apiKey && p) {
+    const key = BYO_ENV_KEY[p];
+    if (key) env[key] = byo.apiKey.trim();
+  }
+  if (byo.baseUrl && p) {
+    const base = BYO_BASE_URL_ENV[p];
+    if (base) env[base] = byo.baseUrl.trim();
+  }
+  return env;
+}
+
+/** Extra CLI args for harnesses that accept --provider/--model (opencode, qwen). */
+function byoArgs(agentId: string, byo: ByoConfig): string[] {
+  if (!byo.enabled || !byo.provider) return [];
+  const p = byo.provider.trim();
+  const m = (byo.model ?? '').trim();
+  // NOTE: pi-acp does NOT parse --provider/--model (only --terminal-login), so
+  // Pi is deliberately excluded — its model is set inside pi itself (/model).
+  if (agentId === 'opencode') {
+    const args = [];
+    if (m) args.push('--model', m); // opencode format: provider/model
+    else args.push('--model', p);
+    return args;
+  }
+  if (agentId === 'qwen' && (m || p)) {
+    const args = ['--provider', p];
+    if (m) args.push('--model', m);
+    return args;
+  }
+  return [];
+}
+
+/** Wrap a spawn so BYO env/args are applied on top of the agent's defaults. */
+function withByo(agentId: string, spawn: () => AgentSpawn, byo?: ByoConfig): () => AgentSpawn {
+  if (!byo?.enabled) return spawn;
+  return () => {
+    const s = spawn();
+    return {
+      ...s,
+      env: { ...s.env, ...byoEnv(byo) },
+      args: [...s.args, ...byoArgs(agentId, byo)],
+    };
+  };
 }
 
 let extension: WebSocket | null = null;
@@ -136,6 +341,9 @@ class ChatManager {
   private client: AcpClient | null = null;
   private starting: Promise<void> | null = null;
   private agentId = 'claude';
+  /** Bumped whenever the agent process changes; stale onExit/start callbacks
+   *  check it so a killed process can't clobber the replacement's state. */
+  private generation = 0;
   private store = new ChatStore();
   private skills = new SkillStore();
   /** the active agent's own commands/skills, advertised over ACP. */
@@ -158,6 +366,7 @@ class ChatManager {
   private async ensureClient(agentId: string, def: AgentDef): Promise<AcpClient> {
     // Switching agent → tear down the old process and start the chosen one.
     if (this.client && this.agentId !== agentId) {
+      this.generation++;
       this.client.stop();
       this.client = null;
       this.starting = null;
@@ -166,6 +375,7 @@ class ChatManager {
     this.agentId = agentId;
     if (this.client) return this.client;
     if (!this.starting) {
+      const gen = ++this.generation;
       const client = new AcpClient(def.spawn(), {
         onUpdate: (sid, update) => this.onUpdate(sid, update),
         onPermission: (req) =>
@@ -177,6 +387,8 @@ class ChatManager {
             options: req.options,
           }),
         onExit: (code) => {
+          // Ignore exits from a process we already replaced.
+          if (gen !== this.generation) return;
           console.error(`[daemon] agent exited (${code})`);
           this.client = null;
           this.starting = null;
@@ -187,11 +399,11 @@ class ChatManager {
       this.starting = client
         .start()
         .then(() => {
-          this.client = client;
+          if (gen === this.generation) this.client = client;
           console.error(`[daemon] ACP agent ready (${this.agentId})`);
         })
         .catch((e) => {
-          this.starting = null;
+          if (gen === this.generation) this.starting = null;
           throw e;
         });
     }
@@ -227,6 +439,16 @@ class ChatManager {
     pushToExtension({ type: 'acp/skills', skills: this.skills.list(), commands: this.agentCommands });
   }
 
+  deleteSkill(id: string) {
+    this.skills.delete(id);
+    this.listSkills();
+  }
+
+  renameSkill(id: string, name: string) {
+    this.skills.rename(id, name);
+    this.listSkills();
+  }
+
   private flushAssistant(sessionId: string) {
     const text = this.buf.get(sessionId);
     if (text && text.trim()) {
@@ -235,28 +457,49 @@ class ChatManager {
     this.buf.delete(sessionId);
   }
 
-  async newSession(agentId?: string, cmd?: string, args?: string[], model?: string, thinking?: boolean): Promise<string> {
+  async newSession(agentId?: string, cmd?: string, args?: string[], model?: string, effort?: 'low' | 'medium' | 'high', byo?: ByoConfig): Promise<string> {
     const id = agentId ?? 'claude';
-    // Thinking is enabled per agent PROCESS via env (read at spawn). Set it here
-    // and fold it into the client key so toggling it forces a respawn.
-    if (thinking) process.env.MAX_THINKING_TOKENS = process.env.ACP_THINKING_TOKENS || '4000';
-    else delete process.env.MAX_THINKING_TOKENS;
     // A "custom" agent runs a command supplied by the side panel; everything
     // else comes from the built-in registry. Claude also honors a model choice.
+    // BYO env/args are layered on top of whatever the agent's default spawn is.
     const def: AgentDef =
       id === 'custom' && cmd
-        ? { spawn: () => ({ command: cmd, args: args ?? [], shell: win }), meta: genericMeta }
-        : agentDef(id);
-    const meta = id === 'claude' ? claudeMeta(model) : def.meta();
-    // Key the client by command + thinking, so editing either respawns the agent.
+        ? {
+            spawn: withByo(id, () => ({ command: cmd, args: args ?? [], shell: win }), byo),
+            meta: genericMeta,
+            mcp: true,
+          }
+        : { ...agentDef(id), spawn: withByo(id, agentDef(id).spawn, byo) };
+    const meta = id === 'claude' ? claudeMeta(model, effort) : def.meta();
+    // Key the client by command + effort, so editing either respawns the agent.
     const base = id === 'custom' ? `custom:${cmd} ${(args ?? []).join(' ')}` : id;
-    const key = base + (thinking ? ':think' : '');
+    const key = `${base}:effort-${effort ?? 'medium'}`;
     const client = await this.ensureClient(key, def);
-    const sessionId = await client.newSession(process.cwd(), [this.browserMcp()], meta);
+    const mcpServers = def.mcp ? [this.browserMcp()] : [];
+    const sessionId = await client.newSession(process.cwd(), mcpServers, meta);
     this.store.create(sessionId);
     this.live.add(sessionId);
     pushToExtension({ type: 'acp/sessionCreated', sessionId });
     return sessionId;
+  }
+
+  /** Re-attach an existing chat session so the user can keep talking to it. */
+  async resumeSession(sessionId: string): Promise<void> {
+    if (!this.client || !this.live.has(sessionId)) {
+      // The session belongs to a previous agent process — load it in the current one.
+      try {
+        const def = agentDef(this.agentId);
+        const client = await this.ensureClient(this.agentId, def);
+        await client.loadSession(sessionId, process.cwd(), def.mcp ? [this.browserMcp()] : []);
+        this.live.add(sessionId);
+        if (!this.store.get(sessionId)) this.store.create(sessionId);
+        pushToExtension({ type: 'acp/sessionCreated', sessionId });
+      } catch (e) {
+        pushToExtension({ type: 'acp/error', sessionId, message: `Could not resume chat: ${String((e as any)?.message ?? e)}` });
+      }
+      return;
+    }
+    pushToExtension({ type: 'acp/sessionCreated', sessionId });
   }
 
   async prompt(sessionId: string, text: string, content?: unknown[]): Promise<void> {
@@ -304,6 +547,38 @@ class ChatManager {
     pushToExtension({ type: 'acp/sessions', sessions: this.store.list() });
   }
 
+  /** Report which agent CLIs are installed so the picker can show Install buttons. */
+  agentStatus() {
+    const status = Object.keys(AGENTS).map((id) => {
+      const installed = commandExists(agentCommand(id));
+      // Pi needs BOTH the adapter and the pi binary to actually run.
+      const missing: string[] = [];
+      if (!commandExists(agentCommand(id))) missing.push(agentCommand(id));
+      if (id === 'pi' && commandExists('pi-acp') && !commandExists('pi')) missing.push('pi');
+      return { id, installed: missing.length === 0, missing };
+    });
+    pushToExtension({ type: 'acp/agentStatus', status });
+  }
+
+  /** Run the agent's installer in-app, streaming output back to the picker. */
+  installAgent(agentId: string) {
+    const inst = AGENT_INSTALL[agentId];
+    if (!inst) {
+      pushToExtension({ type: 'acp/installDone', agentId, ok: false, error: 'No installer for this agent.' });
+      return;
+    }
+    pushToExtension({ type: 'acp/installStarted', agentId, command: `${inst.cmd} ${inst.args.join(' ')}` });
+    const child = spawn(inst.cmd, inst.args, { shell: inst.shell ?? false });
+    const relay = (d: Buffer) => pushToExtension({ type: 'acp/installLog', agentId, line: d.toString() });
+    child.stdout.on('data', relay);
+    child.stderr.on('data', relay);
+    child.on('error', (e) => pushToExtension({ type: 'acp/installDone', agentId, ok: false, error: String(e.message) }));
+    child.on('close', (code) => {
+      pushToExtension({ type: 'acp/installDone', agentId, ok: code === 0 });
+      this.agentStatus();
+    });
+  }
+
   loadSession(sessionId: string) {
     const s = this.store.get(sessionId);
     pushToExtension({ type: 'acp/history', sessionId, messages: s?.messages ?? [] });
@@ -316,15 +591,20 @@ async function handleAcpMessage(msg: any) {
   try {
     switch (msg.type) {
       case 'acp/newSession':
-        await chat.newSession(msg.agentId, msg.cmd, msg.args, msg.model, msg.thinking);
+        await chat.newSession(msg.agentId, msg.cmd, msg.args, msg.model, msg.effort, msg.byo);
         break;
+      case 'acp/resumeSession': await chat.resumeSession(msg.sessionId); break;
       case 'acp/prompt': await chat.prompt(msg.sessionId, msg.text, msg.content); break;
       case 'acp/cancel': chat.cancel(msg.sessionId); break;
       case 'acp/permission': chat.respondPermission(msg.requestId, msg.optionId); break;
       case 'acp/log': console.error('[ext]', (msg as any).msg); break;
       case 'acp/listSessions': chat.listSessions(); break;
       case 'acp/listSkills': chat.listSkills(); break;
+      case 'acp/deleteSkill': chat.deleteSkill(msg.id); break;
+      case 'acp/renameSkill': chat.renameSkill(msg.id, msg.name); break;
       case 'acp/loadSession': chat.loadSession(msg.sessionId); break;
+      case 'acp/agentStatus': chat.agentStatus(); break;
+      case 'acp/installAgent': chat.installAgent(msg.agentId); break;
       case 'acp/skillFromRecording': await chat.skillFromRecording(msg.sessionId, msg.steps); break;
       default: console.error('[daemon] unknown acp message:', msg.type);
     }
@@ -401,6 +681,7 @@ cliWss.on('connection', (ws) => {
       return;
     }
     route.set(msg.id, ws);
+    console.error(`[daemon] → ${msg.method} (${msg.id})`);
     extension.send(data.toString());
   });
   ws.on('close', () => {

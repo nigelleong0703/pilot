@@ -30,6 +30,7 @@ export type BridgeMethod =
   | 'type'
   | 'selectOption'
   | 'getText'
+  | 'listTabs'
   | 'recorder.start'
   | 'recorder.stop'
   | 'recorder.clear'
@@ -42,13 +43,16 @@ export type BridgeMethod =
 
 /** Sent from the side panel (via offscreen) to the daemon. */
 export type AcpClientMessage =
-  | { type: 'acp/newSession'; agentId?: string; cmd?: string; args?: string[]; model?: string; thinking?: boolean }
+  | { type: 'acp/newSession'; agentId?: string; cmd?: string; args?: string[]; model?: string; effort?: 'low' | 'medium' | 'high'; byo?: { enabled?: boolean; provider?: string; model?: string; apiKey?: string; baseUrl?: string } }
+  | { type: 'acp/resumeSession'; sessionId: string }
   | { type: 'acp/prompt'; sessionId: string; text: string; content?: unknown[] }
   | { type: 'acp/cancel'; sessionId: string }
   | { type: 'acp/permission'; requestId: number; optionId: string | null }
   | { type: 'acp/listSessions' }
   | { type: 'acp/loadSession'; sessionId: string }
   | { type: 'acp/listSkills' }
+  | { type: 'acp/deleteSkill'; id: string }
+  | { type: 'acp/renameSkill'; id: string; name: string }
   | { type: 'acp/skillFromRecording'; sessionId: string; steps: unknown[] };
 
 /** Pushed from the daemon to the side panel. */

@@ -147,6 +147,63 @@ export default defineBackground(() => {
   // the wrong page. Between turns we fall back to the live active tab.
   let pinnedTabId: number | null = null;
 
+  // ── Tab grouping (persistent per-session group, à la Claude) ──────────────
+  // The tab(s) Pilot works with live in a colored "Pilot" group in the tab
+  // strip for the whole chat session (not just the turn). Users can drag more
+  // tabs in to work across them (multi-tab workflows). A new chat clears the
+  // group so the next session starts clean.
+  const GROUP_TITLE = 'Pilot';
+  const GROUP_COLOR = 'blue';
+
+  async function pilotGroupId(): Promise<number | null> {
+    try {
+      if (typeof chrome.tabGroups?.query !== 'function') return null;
+      const groups = await chrome.tabGroups.query({ title: GROUP_TITLE });
+      return groups[0]?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function groupTab(tabId: number) {
+    try {
+      if (typeof chrome.tabs.group !== 'function') return;
+      let groupId = await pilotGroupId();
+      if (groupId == null) {
+        groupId = await chrome.tabs.group({ tabIds: [tabId] });
+        await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: GROUP_COLOR });
+      } else {
+        await chrome.tabs.group({ tabIds: [tabId], groupId });
+      }
+    } catch { /* tabGroups unavailable (Firefox etc.) */ }
+  }
+
+  /** All tabs currently in the Pilot group (the agent's multi-tab workspace). */
+  async function groupTabs(): Promise<Array<{ tabId: number; url: string; title: string; active: boolean }>> {
+    const groupId = await pilotGroupId();
+    if (groupId == null) {
+      try {
+        const t = await getActiveTab();
+        return [{ tabId: t.id ?? -1, url: t.url ?? '', title: t.title ?? '', active: true }];
+      } catch { return []; }
+    }
+    const tabs = await chrome.tabs.query({ groupId });
+    return (tabs ?? [])
+      .filter((t) => t.id != null)
+      .map((t) => ({ tabId: t.id!, url: t.url ?? '', title: t.title ?? '', active: !!t.active }));
+  }
+
+  /** Remove every tab from the Pilot group (called on a new chat). */
+  async function clearPilotGroup() {
+    const groupId = await pilotGroupId();
+    if (groupId == null) return;
+    try {
+      if (typeof chrome.tabs.ungroup !== 'function') return;
+      const tabs = await chrome.tabs.query({ groupId });
+      await chrome.tabs.ungroup((tabs ?? []).map((t) => t.id).filter((x): x is number => x != null));
+    } catch { /* ignore */ }
+  }
+
   /** The tab the user is actually looking at (ignores any pin). */
   async function liveActiveTab(): Promise<chrome.tabs.Tab> {
     // Prefer the last-focused NORMAL browser window's active tab (excludes the
@@ -235,8 +292,9 @@ export default defineBackground(() => {
   async function forwardToTab(
     method: PageMethod,
     params?: Record<string, unknown>,
+    tabId?: number,
   ) {
-    const tab = await getActiveTab();
+    const tab = tabId != null ? await chrome.tabs.get(tabId) : await getActiveTab();
     const cmd: PageCommand = { kind: 'COMMAND', method, params };
     try {
       return await sendToTab(tab.id!, cmd);
@@ -254,29 +312,44 @@ export default defineBackground(() => {
   async function pageModeIsCdp(): Promise<boolean> {
     try {
       const r = await chrome.storage.local.get('pilot.settings');
-      // Default CDP (native, robust). Falls back to DOM automatically on error.
+      // CDP (native a11y tree + input events) is the default — like Claude in
+      // Chrome, it shows a debugger banner while attached. DOM is opt-in.
       return r['pilot.settings']?.pageMode !== 'dom';
     } catch {
       return true;
     }
   }
 
+  /** Resolve the tab a command targets: explicit tabId wins, else the active/pinned tab. */
+  async function resolveTab(params: Record<string, unknown>): Promise<chrome.tabs.Tab> {
+    if (typeof params.tabId === 'number') {
+      try { return await chrome.tabs.get(params.tabId); } catch { /* fall through */ }
+    }
+    return getActiveTab();
+  }
+
   async function dispatch(req: BridgeRequest): Promise<unknown> {
     const p = req.params ?? {};
     switch (req.method) {
+      case 'listTabs': {
+        // Multi-tab workflows: tabs the user (or the agent) has placed in the
+        // Pilot group. Falls back to the active tab so single-tab use still works.
+        const tabs = await groupTabs();
+        return { group: 'Pilot', tabs };
+      }
       case 'navigate': {
-        const tab = await getActiveTab();
+        const tab = await resolveTab(p);
         await chrome.tabs.update(tab.id!, { url: String(p.url) });
         await waitForTabComplete(tab.id!);
         await ensureContentScript(tab.id!);
         return { navigatedTo: p.url, tabId: tab.id };
       }
       case 'pageContext': {
-        const tab = await getActiveTab();
+        const tab = await resolveTab(p);
         return { url: tab.url ?? '', title: tab.title ?? '' };
       }
       case 'screenshot': {
-        const tab = await getActiveTab();
+        const tab = await resolveTab(p);
         const dataUrl = await captureScreenshot(tab.windowId);
         if (!dataUrl) throw new Error('Screenshot failed');
         return { dataUrl };
@@ -289,9 +362,9 @@ export default defineBackground(() => {
         // Prefer CDP (native a11y tree + input events); fall back to the
         // content script if the debugger can't attach or a call fails.
         const cdp = await pageModeIsCdp();
-        bglog(`dispatch ${req.method} (cdp=${cdp})`);
+        const tab = await resolveTab(p);
+        bglog(`dispatch ${req.method} tab=${tab.id} (cdp=${cdp})`);
         if (cdp) {
-          const tab = await getActiveTab();
           try {
             let out: unknown;
             switch (req.method) {
@@ -308,7 +381,7 @@ export default defineBackground(() => {
           }
         }
         bglog(`dom ${req.method} start`);
-        const r = await forwardToTab(req.method, p);
+        const r = await forwardToTab(req.method, p, tab.id);
         bglog(`dom ${req.method} ok`);
         return r;
       }
@@ -354,8 +427,11 @@ export default defineBackground(() => {
     // ── Pin the current tab for the duration of a turn ──
     if ((message as { type?: string }).type === 'PIN_TAB') {
       liveActiveTab()
-        .then((t) => {
+        .then(async (t) => {
           pinnedTabId = t.id ?? null;
+          // Persistent per-session group: the tab stays in the Pilot group
+          // after the turn ends (Claude-style) until a new chat clears it.
+          if (t.id != null) await groupTab(t.id);
           sendResponse({ tabId: t.id ?? null, url: t.url ?? '', title: t.title ?? '' });
         })
         .catch(() => sendResponse({ url: '', title: '' }));
@@ -364,6 +440,12 @@ export default defineBackground(() => {
     if ((message as { type?: string }).type === 'UNPIN_TAB') {
       pinnedTabId = null;
       liveActiveTab().then((t) => broadcastActiveTab(t)).catch(() => {});
+      return;
+    }
+    // ── A new chat starts: clear the Pilot tab group for a fresh session ──
+    if ((message as { type?: string }).type === 'CLEAR_PILOT_GROUP') {
+      pinnedTabId = null;
+      void clearPilotGroup();
       return;
     }
 

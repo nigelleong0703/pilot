@@ -103,6 +103,32 @@ const formatToolDuration = (ms: number) => {
   return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
 };
 
+/** Friendly display names for the browser MCP tools. */
+const FRIENDLY_TOOLS: Record<string, string> = {
+  browser_list_tabs: "List tabs",
+  browser_navigate: "Navigate",
+  browser_snapshot: "Inspect page",
+  browser_click: "Click",
+  browser_type: "Type",
+  browser_get_text: "Read page",
+  browser_screenshot: "Screenshot",
+  browser_select_option: "Select",
+  save_skill: "Save skill",
+  list_skills: "List skills",
+};
+
+/**
+ * MCP clients namespace tools as `<server>_<tool>`. Our browser server is named
+ * "browser", so `browser_get_text` arrives doubled as `browser_browser_get_text`.
+ * Collapse the duplicate and map known tools to a readable label.
+ */
+function prettyToolName(name: string): string {
+  const key = name.startsWith("browser_browser_")
+    ? name.slice("browser_".length)
+    : name;
+  return FRIENDLY_TOOLS[key] ?? key.replace(/^browser_/, "").replace(/[_-]+/g, " ");
+}
+
 function ToolFallbackDuration({
   className,
   ...props
@@ -139,7 +165,7 @@ function ToolFallbackTrigger({
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  const label = isCancelled ? "Cancelled tool" : "Used tool";
+  const label = isCancelled ? "Cancelled tool" : prettyToolName(toolName);
 
   return (
     <CollapsibleTrigger
@@ -166,7 +192,7 @@ function ToolFallbackTrigger({
         )}
       >
         <span>
-          {label}: <b>{toolName}</b>
+          {label}
         </span>
         {isRunning && (
           <span
@@ -174,7 +200,7 @@ function ToolFallbackTrigger({
             data-slot="tool-fallback-trigger-shimmer"
             className="aui-tool-fallback-trigger-shimmer shimmer pointer-events-none absolute inset-0 motion-reduce:animate-none"
           >
-            {label}: <b>{toolName}</b>
+            {label}
           </span>
         )}
       </span>

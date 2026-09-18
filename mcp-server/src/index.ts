@@ -164,13 +164,29 @@ server.registerTool(
 );
 
 server.registerTool(
+  'browser_list_tabs',
+  {
+    title: 'List Pilot tabs',
+    description:
+      'Return the tabs in the Pilot group (the multi-tab workspace: the page Pilot is driving ' +
+      'plus any tabs the user dragged in). Each entry has a "tabId" you can pass to the other ' +
+      'browser_* tools to act on that specific tab. Use this to work across several tabs.',
+    inputSchema: {},
+  },
+  async () => asText(await call('listTabs')),
+);
+
+server.registerTool(
   'browser_navigate',
   {
     title: 'Navigate',
-    description: 'Navigate the active browser tab to a URL.',
-    inputSchema: { url: z.string().url().describe('Absolute URL to open') },
+    description: 'Navigate a browser tab to a URL (defaults to the active Pilot tab).',
+    inputSchema: {
+      url: z.string().url().describe('Absolute URL to open'),
+      tabId: z.number().int().optional().describe('Tab to navigate (from browser_list_tabs)'),
+    },
   },
-  async ({ url }) => asText(await call('navigate', { url })),
+  async ({ url, tabId }) => asText(await call('navigate', { url, tabId })),
 );
 
 server.registerTool(
@@ -178,11 +194,13 @@ server.registerTool(
   {
     title: 'Snapshot page',
     description:
-      'Return a list of visible interactive elements on the active tab, each with a numeric "ref". ' +
+      'Return a list of visible interactive elements on a tab, each with a numeric "ref". ' +
       'Use a ref with browser_click / browser_type. Call this before interacting.',
-    inputSchema: {},
+    inputSchema: {
+      tabId: z.number().int().optional().describe('Tab to snapshot (defaults to active Pilot tab)'),
+    },
   },
-  async () => asText(await call('snapshot')),
+  async ({ tabId }) => asText(await call('snapshot', { tabId })),
 );
 
 server.registerTool(
@@ -193,9 +211,10 @@ server.registerTool(
     inputSchema: {
       ref: z.number().int().optional().describe('ref from browser_snapshot'),
       selector: z.string().optional().describe('CSS selector (fallback)'),
+      tabId: z.number().int().optional().describe('Tab to click in (defaults to active Pilot tab)'),
     },
   },
-  async ({ ref, selector }) => asText(await call('click', { ref, selector })),
+  async ({ ref, selector, tabId }) => asText(await call('click', { ref, selector, tabId })),
 );
 
 server.registerTool(
@@ -208,10 +227,11 @@ server.registerTool(
       selector: z.string().optional().describe('CSS selector (fallback)'),
       text: z.string().describe('Text to type'),
       submit: z.boolean().optional().describe('Submit the form / press Enter after typing'),
+      tabId: z.number().int().optional().describe('Tab to type in (defaults to active Pilot tab)'),
     },
   },
-  async ({ ref, selector, text, submit }) =>
-    asText(await call('type', { ref, selector, text, submit })),
+  async ({ ref, selector, text, submit, tabId }) =>
+    asText(await call('type', { ref, selector, text, submit, tabId })),
 );
 
 server.registerTool(
@@ -225,30 +245,35 @@ server.registerTool(
       ref: z.number().int().optional().describe('ref from browser_snapshot'),
       selector: z.string().optional().describe('CSS selector (fallback)'),
       text: z.string().describe('Visible option text to select (case-insensitive)'),
+      tabId: z.number().int().optional().describe('Tab to select in (defaults to active Pilot tab)'),
     },
   },
-  async ({ ref, selector, text }) => asText(await call('selectOption', { ref, selector, text })),
+  async ({ ref, selector, text, tabId }) => asText(await call('selectOption', { ref, selector, text, tabId })),
 );
 
 server.registerTool(
   'browser_get_text',
   {
     title: 'Get page text',
-    description: 'Return the visible text content of the active tab (truncated).',
-    inputSchema: {},
+    description: 'Return the visible text content of a tab (truncated).',
+    inputSchema: {
+      tabId: z.number().int().optional().describe('Tab to read (defaults to active Pilot tab)'),
+    },
   },
-  async () => asText(await call('getText')),
+  async ({ tabId }) => asText(await call('getText', { tabId })),
 );
 
 server.registerTool(
   'browser_screenshot',
   {
     title: 'Screenshot',
-    description: 'Capture a JPEG screenshot of the active tab viewport.',
-    inputSchema: {},
+    description: 'Capture a JPEG screenshot of a tab viewport.',
+    inputSchema: {
+      tabId: z.number().int().optional().describe('Tab to capture (defaults to active Pilot tab)'),
+    },
   },
-  async () => {
-    const { dataUrl } = (await call('screenshot')) as { dataUrl: string };
+  async ({ tabId }) => {
+    const { dataUrl } = (await call('screenshot', { tabId })) as { dataUrl: string };
     const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
     return { content: [{ type: 'image' as const, data: base64, mimeType: 'image/jpeg' }] };
   },

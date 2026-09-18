@@ -57,6 +57,8 @@ export interface AgentSpawn {
   args: string[];
   /** Use a shell (needed for a Windows `.cmd` shim; false when running node directly). */
   shell?: boolean;
+  /** Extra environment variables applied to this agent's process (e.g. CODEX_CONFIG). */
+  env?: Record<string, string>;
 }
 
 /**
@@ -109,7 +111,7 @@ export class AcpClient extends EventEmitter {
     const child = spawn(this.spawnSpec.command, this.spawnSpec.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: this.spawnSpec.shell ?? false,
-      env,
+      env: { ...env, ...(this.spawnSpec.env ?? {}) },
     });
     this.child = child;
 

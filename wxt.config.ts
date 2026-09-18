@@ -8,7 +8,7 @@ export default defineConfig({
     name: 'Pilot',
     description: 'Chat with an agent that drives the page you’re on, and records actions as skills.',
     version: '1.0.0',
-    permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'tabs', 'alarms', 'offscreen', 'debugger'],
+    permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'tabs', 'tabGroups', 'alarms', 'offscreen', 'debugger'],
     // captureVisibleTab needs a host grant; <all_urls> lets it work on any page.
     host_permissions: ['<all_urls>'],
     // Open the side panel when the toolbar icon is clicked.
