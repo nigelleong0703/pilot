@@ -1,0 +1,27 @@
+{
+  "name": "my-recorder-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that lets a local AI drive the browser through the My Recorder extension.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "my-recorder-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "bridge:check": "node scripts/bridge-check.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@zed-industries/claude-code-acp": "^0.16.2",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.6.3"
+  }
+}

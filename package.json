@@ -1,0 +1,39 @@
+{
+  "name": "my-recorder",
+  "version": "1.0.0",
+  "description": "A Chrome extension that records user actions on a page (clicks, typing, selects, submits) as semantic steps, shown live in a Side Panel.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "postinstall": "wxt prepare"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@wxt-dev/module-react": "^1.2.2",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.6.3",
+    "wxt": "^0.19.13"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "^0.15.15",
+    "@assistant-ui/react-markdown": "^0.14.11",
+    "class-variance-authority": "^0.7.1",
+    "lucide-react": "^1.33.0",
+    "radix-ui": "^1.6.7",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "remark-gfm": "^4.0.1",
+    "tw-shimmer": "^0.4.12",
+    "zustand": "^5.0.15"
+  }
+}

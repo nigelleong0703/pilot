@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Recorder Test Form</title>
+    <style>
+      body { font: 15px system-ui, sans-serif; max-width: 460px; margin: 40px auto; }
+      label { display: block; margin: 14px 0 4px; font-weight: 600; }
+      input, select { width: 100%; padding: 8px; font: inherit; }
+      .row { margin: 14px 0; }
+      button { margin-top: 18px; padding: 10px 16px; font: inherit; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>Test Form</h1>
+    <form id="demo">
+      <label for="name">Your name</label>
+      <input id="name" name="name" placeholder="Jane Doe" />
+
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" placeholder="jane@example.com" />
+
+      <label for="color">Favorite color</label>
+      <select id="color" name="color">
+        <option value="">Pick one…</option>
+        <option value="red">Red</option>
+        <option value="green">Green</option>
+        <option value="pro">Pro</option>
+      </select>
+
+      <div class="row">
+        <label><input type="checkbox" id="agree" name="agree" /> I agree to terms</label>
+      </div>
+
+      <button type="submit">Submit form</button>
+    </form>
+    <p id="done" hidden>Submitted ✓</p>
+    <script>
+      document.getElementById('demo').addEventListener('submit', (e) => {
+        e.preventDefault();
+        document.getElementById('done').hidden = false;
+      });
+    </script>
+  </body>
+</html>

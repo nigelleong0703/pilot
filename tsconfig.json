@@ -1,0 +1,10 @@
+{
+  // WXT generates the real config at .wxt/tsconfig.json after `wxt prepare`.
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "jsx": "react-jsx"
+  },
+  "exclude": ["mcp-server"]
+}
