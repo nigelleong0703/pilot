@@ -286,9 +286,9 @@ server.registerTool(
   {
     title: 'Open a new tab',
     description:
-      'Open a URL in a NEW tab inside the Pilot group and target it (returns tabId). Use this ' +
-      'when the task is on a different page/site, instead of overwriting the tab the user is ' +
-      'actively using. Omit `url` to open a blank Pilot tab.',
+      'Open a URL in a NEW tab inside the Pilot group (returns tabId). Use this ONLY when the task ' +
+      'genuinely needs an extra page open in parallel — for normal navigation/clicks, reuse the ' +
+      'existing workspace tab instead. Never overwrite the tab the user is actively using.',
     inputSchema: {
       url: z.string().describe('Absolute URL to open (or "" for a blank tab)').optional(),
     },

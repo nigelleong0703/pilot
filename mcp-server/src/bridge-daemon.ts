@@ -196,10 +196,11 @@ const PILOT_SYSTEM_PROMPT =
   'browser_type, browser_select_option, browser_get_text, browser_screenshot). You work in the ' +
   '"Pilot" tab group: browser_list_tabs lists those tabs (plus the user\'s active tab) and each has ' +
   'a tabId you can pass to the other tools. ' +
-  'CHOOSE THE TARGET TAB YOURSELF, and NEVER navigate or overwrite a tab the user is actively ' +
-  'using (their YouTube, email, docs…): if the task is on a different page/site than the current ' +
-  'Pilot tab, call browser_new_tab to open a dedicated tab in the Pilot group and act there; reuse ' +
-  'an existing Pilot-group tab when it is the right one. ' +
+  'There is ONE reusable workspace tab in the Pilot group — do your navigation and clicks THERE and ' +
+  'REUSE it; do NOT open a new tab for each step. Decide from context: reuse the workspace tab for ' +
+  'normal navigation/clicks, and call browser_new_tab only when the task genuinely needs an extra ' +
+  'page open in parallel (a multi-tab workflow). NEVER navigate or overwrite a tab the user is ' +
+  'actively using (their YouTube, email, docs…). ' +
   'Every message includes the page the user is currently viewing. ' +
   'ALWAYS use these browser_* tools for any web browsing or page interaction — never launch a ' +
   'separate or headless browser, and do not browse the web with any other tool. These browser_* ' +

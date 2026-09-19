@@ -358,9 +358,29 @@ export default defineBackground(() => {
     }
   }
 
-  /** Resolve the tab a command targets. NEVER creates a tab implicitly:
-   *  explicit tabId → the pinned/Pilot-group tab → the user's current tab.
-   *  A dedicated workspace tab is opened only by browser_new_tab (the model). */
+  /** One reusable Pilot workspace tab (created once, de-duped under concurrency). */
+  let workspaceCreating: Promise<chrome.tabs.Tab> | null = null;
+  async function ensureWorkspaceTab(): Promise<chrome.tabs.Tab> {
+    const groupId = await pilotGroupId();
+    if (groupId != null) {
+      const t = (await chrome.tabs.query({ groupId })).find((x) => x.id != null);
+      if (t) return t;
+    }
+    if (!workspaceCreating) {
+      workspaceCreating = chrome.tabs
+        .create({ url: 'about:blank', active: true })
+        .then(async (t) => {
+          if (t.id != null) await groupTab(t.id);
+          workspaceCreating = null;
+          return t;
+        })
+        .catch((e) => { workspaceCreating = null; throw e; });
+    }
+    return workspaceCreating;
+  }
+
+  /** Resolve the tab a command targets. NEVER creates a tab per call: explicit
+   *  tabId → pinned/Pilot-group tab → the single workspace tab (created once). */
   async function resolveTab(params: Record<string, unknown>): Promise<chrome.tabs.Tab> {
     if (typeof params.tabId === 'number') {
       try { return await chrome.tabs.get(params.tabId); } catch { /* fall through */ }
@@ -368,13 +388,9 @@ export default defineBackground(() => {
     if (pinnedTabId != null) {
       try { return await chrome.tabs.get(pinnedTabId); } catch { pinnedTabId = null; }
     }
-    const groupId = await pilotGroupId();
-    if (groupId != null) {
-      const tabs = await chrome.tabs.query({ groupId });
-      const t = tabs.find((x) => x.id != null);
-      if (t) { pinnedTabId = t.id!; return t; }
-    }
-    return liveActiveTab();
+    const t = await ensureWorkspaceTab();
+    pinnedTabId = t.id ?? null;
+    return t;
   }
 
   const PAGE_METHODS = new Set([
