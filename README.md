@@ -224,6 +224,20 @@ npm publish             # publishes the `bin` in package.json
 
 ---
 
+## Screenshots
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="Pilot side panel next to a page" width="820" />
+</p>
+<p align="center"><em>The side panel next to the page the agent drives.</em></p>
+
+<p align="center">
+  <img src="assets/sidebar.png" alt="Pilot side panel" width="360" />
+</p>
+<p align="center"><em>The side panel on its own.</em></p>
+
+---
+
 ## Development
 
 ```bash
