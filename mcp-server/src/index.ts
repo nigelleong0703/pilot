@@ -312,31 +312,33 @@ server.registerTool(
   'browser_click',
   {
     title: 'Click element',
-    description: 'Click an element by its snapshot ref (preferred) or a CSS selector.',
+    description: 'Click an element by its snapshot ref (preferred), a CSS selector, or visible `text` (searches every frame, including cross-origin iframes).',
     inputSchema: {
       ref: z.number().int().optional().describe('ref from browser_snapshot'),
       selector: z.string().optional().describe('CSS selector (fallback)'),
+      text: z.string().optional().describe('Visible text / aria-label to match (works across all frames)'),
       tabId: z.number().int().optional().describe('Tab to click in (defaults to active Pilot tab)'),
     },
   },
-  async ({ ref, selector, tabId }) => asText(await call('click', { ref, selector, tabId })),
+  async ({ ref, selector, text, tabId }) => asText(await call('click', { ref, selector, text, tabId })),
 );
 
 server.registerTool(
   'browser_type',
   {
     title: 'Type into element',
-    description: 'Type text into an input/textarea by snapshot ref or CSS selector.',
+    description: 'Type text into an input/textarea by snapshot ref, CSS selector, or field label `match` (searches every frame, including cross-origin iframes).',
     inputSchema: {
       ref: z.number().int().optional().describe('ref from browser_snapshot'),
       selector: z.string().optional().describe('CSS selector (fallback)'),
+      match: z.string().optional().describe('Field label / aria-label / placeholder to find the input (all frames)'),
       text: z.string().describe('Text to type'),
       submit: z.boolean().optional().describe('Submit the form / press Enter after typing'),
       tabId: z.number().int().optional().describe('Tab to type in (defaults to active Pilot tab)'),
     },
   },
-  async ({ ref, selector, text, submit, tabId }) =>
-    asText(await call('type', { ref, selector, text, submit, tabId })),
+  async ({ ref, selector, match, text, submit, tabId }) =>
+    asText(await call('type', { ref, selector, match, text, submit, tabId })),
 );
 
 server.registerTool(

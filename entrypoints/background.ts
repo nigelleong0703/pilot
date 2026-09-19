@@ -446,6 +446,76 @@ export default defineBackground(() => {
     return { results };
   }
 
+  // ── Deep frame read/act ──────────────────────────────────────────────────
+  // chrome.scripting injects into EVERY frame the extension can access,
+  // including cross-origin (out-of-process) iframes that chrome.debugger's
+  // per-frame query and content scripts can't reach — e.g. Google consoles.
+  async function deepRead(tabId: number): Promise<{ url: string; title: string; nodes: Array<{ ref: number; role: string; label: string; tag: string }>; text: string }> {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: () => {
+          const nodes: Array<{ role: string; label: string }> = [];
+          const els = document.querySelectorAll('a,button,input,select,textarea,summary,[role],[onclick],label');
+          for (const el of Array.from(els)) {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) continue;
+            const label = (
+              el.getAttribute('aria-label') ||
+              (el as HTMLElement).innerText ||
+              el.getAttribute('placeholder') ||
+              el.getAttribute('title') ||
+              ''
+            ).trim().slice(0, 80);
+            nodes.push({ role: el.getAttribute('role') || el.tagName.toLowerCase(), label });
+            if (nodes.length >= 300) break;
+          }
+          return { url: location.href, title: document.title, text: (document.body ? document.body.innerText : '').slice(0, 20000), nodes };
+        },
+      } as any);
+      let ref = 1;
+      const nodes: Array<{ ref: number; role: string; label: string; tag: string }> = [];
+      for (const r of results) {
+        for (const n of ((r.result as any)?.nodes ?? [])) {
+          nodes.push({ ref: ref++, role: n.role, label: n.label, tag: n.role });
+        }
+      }
+      const text = results.map((r: any) => r.result?.text ?? '').filter(Boolean).join('\n');
+      const first: any = results[0]?.result ?? {};
+      return { url: first.url ?? '', title: first.title ?? '', nodes, text };
+    } catch {
+      return { url: '', title: '', nodes: [], text: '' };
+    }
+  }
+
+  async function deepAct(tabId: number, action: 'click' | 'type', match: string, text = ''): Promise<boolean> {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        args: [action, match, text] as any,
+        func: (act: string, m: string, val: string) => {
+          const want = m.toLowerCase();
+          const els = Array.from(document.querySelectorAll('a,button,input,select,textarea,summary,[role],[onclick],label')) as HTMLElement[];
+          const labelOf = (el: Element) =>
+            (el.getAttribute('aria-label') || (el as HTMLElement).innerText || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().toLowerCase();
+          const el = els.find((e) => labelOf(e) === want) || els.find((e) => labelOf(e).includes(want));
+          if (!el) return false;
+          el.scrollIntoView({ block: 'center' });
+          if (act === 'click') { el.click(); return true; }
+          const input = el as HTMLInputElement;
+          input.focus();
+          input.value = val;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        },
+      } as any);
+      return results.some((r) => r.result === true);
+    } catch {
+      return false;
+    }
+  }
+
   async function dispatch(req: BridgeRequest): Promise<unknown> {
     const p = req.params ?? {};
     // Any page action shows the whole-page "agent is controlling this tab" glow.
@@ -488,13 +558,13 @@ export default defineBackground(() => {
       case 'selectOption':
       case 'getText': {
         // Prefer CDP (native a11y tree + input events); fall back to the
-        // content script if the debugger can't attach or a call fails.
+        // content script; finally fall back to deep all-frames scripting.
         const cdp = await pageModeIsCdp();
         const tab = await resolveTab(p);
         bglog(`dispatch ${req.method} tab=${tab.id} (cdp=${cdp})`);
+        let out: any;
         if (cdp) {
           try {
-            let out: unknown;
             switch (req.method) {
               case 'snapshot': out = await cdpSnapshot(tab.id!); break;
               case 'click': out = await cdpClick(tab.id!, p); break;
@@ -503,15 +573,40 @@ export default defineBackground(() => {
               case 'getText': out = await cdpGetText(tab.id!); break;
             }
             bglog(`cdp ${req.method} ok`);
-            return out;
           } catch (err) {
             bglog(`cdp ${req.method} FAILED: ${(err as Error)?.message} — falling back to DOM`);
+            out = undefined;
           }
         }
-        bglog(`dom ${req.method} start`);
-        const r = await forwardToTab(req.method, p, tab.id);
-        bglog(`dom ${req.method} ok`);
-        return r;
+        if (out === undefined) {
+          try {
+            out = await forwardToTab(req.method, p, tab.id);
+            bglog(`dom ${req.method} ok`);
+          } catch (err) {
+            bglog(`dom ${req.method} FAILED: ${(err as Error)?.message}`);
+            out = undefined;
+          }
+        }
+        // Deep fallback across ALL frames (reaches cross-origin iframes).
+        if (req.method === 'snapshot' && !((out?.nodes ?? []).length)) {
+          return { ...(await deepRead(tab.id!)), viaFrames: true };
+        }
+        if (req.method === 'getText') {
+          const deep = await deepRead(tab.id!);
+          if (deep.text.trim()) return { text: deep.text.slice(0, 40000), viaFrames: true };
+          return { text: String(out?.text ?? '') };
+        }
+        if ((req.method === 'click' || req.method === 'type' || req.method === 'selectOption') && out === undefined) {
+          const match = String(
+            req.method === 'type' ? (p.match ?? p.label ?? '') : (p.text ?? p.match ?? p.label ?? ''),
+          );
+          if (match && (await deepAct(tab.id!, req.method === 'click' ? 'click' : 'type', match, String(p.text ?? '')))) {
+            return { viaFrames: true, [req.method]: match };
+          }
+          throw new Error(`${req.method}: element not found (take a snapshot or pass \`text\`)`);
+        }
+        if (out === undefined) throw new Error(`${req.method}: no result`);
+        return out;
       }
 
       case 'recorder.start':    startRecording(String(p.message ?? ''));  return { isRecording };
