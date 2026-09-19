@@ -61,7 +61,8 @@ export type AcpClientMessage =
   | { type: 'acp/renameSkill'; id: string; name: string }
   | { type: 'acp/skillFromRecording'; sessionId: string; steps: unknown[] }
   | { type: 'acp/authorSkill'; actions: unknown[]; notes?: string[]; agentId?: string; model?: string; effort?: 'low' | 'medium' | 'high' }
-  | { type: 'acp/agentModels'; agentId: string }
+  | { type: 'acp/agentModels'; agentId?: string }
+  | { type: 'acp/setModel'; modelId: string }
   | { type: 'acp/saveSkill'; skill: { name: string; description?: string; inputs?: string[]; steps: string[]; actions?: unknown[] } };
 
 /** Pushed from the daemon to the side panel. */
@@ -76,7 +77,8 @@ export type AcpServerMessage =
   | { type: 'acp/skillDraft'; draft: { id?: string; name: string; description?: string; inputs?: string[]; steps: Array<{ do: string; why?: string; live?: boolean }>; actions?: unknown[] } }
   | { type: 'acp/skillDraftError'; message: string }
   | { type: 'acp/skillSaved'; id: string; name: string; exportedTo: string[] }
-  | { type: 'acp/agentModels'; agentId: string; models: string[] }
+  | { type: 'acp/agentModels'; models: Array<{ id: string; name: string; description?: string }>; current?: string }
+  | { type: 'acp/modelChanged'; modelId: string }
   | { type: 'acp/error'; sessionId?: string; message: string };
 
 /** Methods the background forwards to the active tab's content script. */

@@ -776,7 +776,7 @@ function SettingsPage({ bridge }: { bridge: boolean }) {
   const [connected, setConnected] = useState<string | null>(null);
   const [showAllAgents, setShowAllAgents] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<Array<{ id: string; name: string }>>([]);
 
   useEffect(() => {
     const onMsg = (msg: any) => {
@@ -847,7 +847,7 @@ function SettingsPage({ bridge }: { bridge: boolean }) {
             <span className="mb-1 block text-[11px] text-muted-foreground">Model</span>
             <select value={s.model} onChange={(e) => apply({ model: e.target.value })} className={selectCls}>
               <option value="">Default</option>
-              {models.map((m) => (<option key={m} value={m}>{m}</option>))}
+              {models.map((m) => (<option key={m.id} value={m.id}>{m.name}</option>))}
             </select>
           </label>
         )}
@@ -873,7 +873,15 @@ function SettingsPage({ bridge }: { bridge: boolean }) {
           <div className="mt-3 grid grid-cols-2 gap-2">
             <label className="block">
               <span className="mb-1 block text-[11px] text-muted-foreground">Model</span>
-              <select value={s.model} onChange={(e) => apply({ model: e.target.value })} className={selectCls}>
+            <select
+              value={s.model}
+              onChange={(e) => {
+                const model = e.target.value;
+                apply({ model });
+                if (s.agentId !== 'claude') acp({ type: 'acp/setModel', modelId: model });
+              }}
+              className={selectCls}
+            >
                 {CLAUDE_MODELS.map((m) => (<option key={m.id} value={m.id}>{m.label}</option>))}
               </select>
             </label>

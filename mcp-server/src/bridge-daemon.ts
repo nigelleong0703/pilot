@@ -484,6 +484,8 @@ class ChatManager {
   private buf = new Map<string, string>();
   /** One-shot text collectors for helper sessions (e.g. skill authoring). */
   private collectors = new Map<string, { text: string }>();
+  /** The most recent chat session, for runtime model switching. */
+  private currentSessionId: string | null = null;
 
   /** The browser MCP handed to every agent session so it can drive the page. */
   private browserMcp(): McpServerSpec {
@@ -600,9 +602,8 @@ class ChatManager {
   async newSession(agentId?: string, cmd?: string, args?: string[], model?: string, effort?: 'low' | 'medium' | 'high', byo?: ByoConfig): Promise<string> {
     const id = agentId ?? 'claude';
     // A "custom" agent runs a command supplied by the side panel; everything
-    // else comes from the built-in registry. Claude also honors a model choice.
-    // Agents that accept --model (opencode/qwen) get the side-panel model too.
-    // BYO env/args are layered on top of whatever the agent's default spawn is.
+    // else comes from the built-in registry. Agents that accept --model
+    // (opencode/qwen) get the chosen model; Claude gets it via meta.
     const raw = id === 'custom' && cmd
       ? () => ({ command: cmd, args: args ?? [], shell: win })
       : agentDef(id).spawn;
@@ -616,16 +617,42 @@ class ChatManager {
         ? { spawn: withByo(id, modelSpawn, byo), meta: genericMeta, mcp: true }
         : { ...agentDef(id), spawn: withByo(id, modelSpawn, byo) };
     const meta = id === 'claude' ? claudeMeta(model, effort) : def.meta();
-    // Key the client by command + model + effort, so editing either respawns.
     const base = id === 'custom' ? `custom:${cmd} ${(args ?? []).join(' ')}` : id;
     const key = `${base}:model-${model ?? ''}:effort-${effort ?? 'medium'}`;
     const client = await this.ensureClient(key, id, def);
     const mcpServers = def.mcp ? [this.browserMcp()] : [];
-    const sessionId = await client.newSession(AGENT_CWD, mcpServers, meta);
+    const res = await client.newSession(AGENT_CWD, mcpServers, meta);
+    // The ACP spec says session/new returns { sessionId, models? }, but some
+    // agents (opencode) return the sessionId string directly.
+    const sessionId = typeof res === 'string' ? res : String(res?.sessionId ?? '');
+    this.currentSessionId = sessionId;
     this.store.create(sessionId, { agentId: id, model, effort, cmd, args });
     this.live.add(sessionId);
     pushToExtension({ type: 'acp/sessionCreated', sessionId });
+    if (res && typeof res === 'object' && res.models) this.pushModels(res.models, model);
     return sessionId;
+  }
+
+  /** Push the ACP model list (available + current) to the side panel. */
+  private pushModels(models: any, selected?: string): void {
+    if (!models?.availableModels) return;
+    pushToExtension({
+      type: 'acp/agentModels',
+      models: models.availableModels.map((m: any) => ({ id: m.modelId, name: m.name, description: m.description })),
+      current: selected ?? models.currentModelId,
+    });
+  }
+
+  /** Switch the active model via ACP (no process restart). */
+  async setModel(modelId: string): Promise<void> {
+    if (!this.client || !this.currentSessionId) return;
+    try {
+      await this.client.setModel(this.currentSessionId, modelId);
+      pushToExtension({ type: 'acp/modelChanged', modelId });
+    } catch (e) {
+      console.error('[daemon] set_model failed:', String((e as any)?.message ?? e));
+    }
+  }
   }
 
   /** Re-attach an existing chat session so the user can keep talking to it. */
@@ -807,17 +834,18 @@ class ChatManager {
       opencode: [process.env.ACP_OPENCODE_CMD ?? 'opencode', ['models']],
     };
     const spec = cmds[agentId];
-    if (!spec) { pushToExtension({ type: 'acp/agentModels', agentId, models: [] }); return; }
+    if (!spec) { pushToExtension({ type: 'acp/agentModels', models: [] }); return; }
     let out = '';
     let child;
     try { child = spawn(spec[0], spec[1], { shell: win }); }
-    catch { pushToExtension({ type: 'acp/agentModels', agentId, models: [] }); return; }
+    catch { pushToExtension({ type: 'acp/agentModels', models: [] }); return; }
     child.stdout?.on('data', (d: Buffer) => { out += d.toString(); });
     child.stderr?.on('data', (d: Buffer) => { out += d.toString(); });
     const done = () => {
       const models = out.split('\n').map((s) => s.trim())
-        .filter((s) => /^[\w.-]+\/[\w.:-]+$/.test(s));
-      pushToExtension({ type: 'acp/agentModels', agentId, models });
+        .filter((s) => /^[\w.-]+\/[\w.:-]+$/.test(s))
+        .map((id) => ({ id, name: id }));
+      pushToExtension({ type: 'acp/agentModels', models });
     };
     child.on('error', done);
     child.on('close', done);
@@ -916,6 +944,7 @@ async function handleAcpMessage(msg: any) {
       case 'acp/loadSession': chat.loadSession(msg.sessionId); break;
       case 'acp/agentStatus': chat.agentStatus(); break;
       case 'acp/agentModels': chat.agentModels(msg.agentId); break;
+      case 'acp/setModel': await chat.setModel(msg.modelId); break;
       case 'acp/connectAgent': connectAgent(msg.agentId); break;
       case 'acp/installAgent': chat.installAgent(msg.agentId); break;
       case 'acp/skillFromRecording': await chat.skillFromRecording(msg.sessionId, msg.steps); break;

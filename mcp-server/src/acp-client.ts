@@ -135,11 +135,16 @@ export class AcpClient extends EventEmitter {
    * `meta` maps to claude-code-acp's `_meta` (systemPrompt, claudeCode.options…),
    * which we use to steer tool choice and avoid loading the user's other MCP servers.
    */
-  async newSession(cwd: string, mcpServers: McpServerSpec[], meta?: unknown): Promise<string> {
+  /** Create a session. Returns the full response (sessionId + optional models). */
+  async newSession(cwd: string, mcpServers: McpServerSpec[], meta?: unknown): Promise<any> {
     const params: Record<string, unknown> = { cwd, mcpServers };
     if (meta) params._meta = meta;
-    const res = await this.request('session/new', params);
-    return res.sessionId as string;
+    return this.request('session/new', params);
+  }
+
+  /** Switch the model for a session via ACP `session/set_model`. */
+  async setModel(sessionId: string, modelId: string): Promise<any> {
+    return this.request('session/set_model', { sessionId, modelId });
   }
 
   /** Resume a previously created session (agent capability loadSession). */

@@ -25,7 +25,7 @@ const item = 'flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text
 export function ModelEffortSelector() {
   const { settings, update } = useSettings();
   const [draft, setDraft] = useState('');
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<Array<{ id: string; name: string }>>([]);
 
   const caps = AGENT_CAPS[settings.agentId];
   const isClaude = settings.agentId === 'claude';
@@ -51,11 +51,18 @@ export function ModelEffortSelector() {
 
   const modelLabel = isClaude
     ? CLAUDE_MODELS.find((m) => m.id === settings.model)?.label ?? 'Default'
-    : settings.model || settings.byoModel || (models ? 'Default' : null);
+    : settings.model
+      ? models.find((m) => m.id === settings.model)?.name ?? settings.model
+      : 'Default';
   const effortLabel = EFFORTS.find((e) => e.id === settings.effort)?.label ?? 'Medium';
 
   const changeModel = (model: string) => {
     void update({ model });
+    // Best-effort live switch (agents that support session/set_model) + a fresh
+    // session so --model-based agents (opencode/qwen) pick it up too.
+    if (!isClaude) {
+      chrome.runtime.sendMessage({ kind: 'ACP_SEND', payload: { type: 'acp/setModel', modelId: model } }).catch(() => {});
+    }
     resetSession();
   };
 
@@ -119,9 +126,9 @@ export function ModelEffortSelector() {
                 {!settings.model && <CheckIcon className="size-3.5" />}
               </DropdownMenu.Item>
               {models.map((m) => (
-                <DropdownMenu.Item key={m} className={item} onSelect={() => changeModel(m)}>
-                  <span className="min-w-0 flex-1 truncate">{m}</span>
-                  {settings.model === m && <CheckIcon className="size-3.5 shrink-0" />}
+                <DropdownMenu.Item key={m.id} className={item} onSelect={() => changeModel(m.id)}>
+                  <span className="min-w-0 flex-1 truncate">{m.name}</span>
+                  {settings.model === m.id && <CheckIcon className="size-3.5 shrink-0" />}
                 </DropdownMenu.Item>
               ))}
             </>
