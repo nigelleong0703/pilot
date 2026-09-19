@@ -653,7 +653,6 @@ class ChatManager {
       console.error('[daemon] set_model failed:', String((e as any)?.message ?? e));
     }
   }
-  }
 
   /** Re-attach an existing chat session so the user can keep talking to it. */
   async resumeSession(sessionId: string, agentIdHint?: string, modelHint?: string, effortHint?: 'low' | 'medium' | 'high'): Promise<boolean> {
