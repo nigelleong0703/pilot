@@ -239,7 +239,14 @@ export default defineBackground(() => {
       const t = tabs.find((x) => x.id != null);
       if (t) return t;
     }
-    const created = await chrome.tabs.create({ url: 'about:blank', active: true });
+    // New Pilot tab. Open the page the user is currently viewing, so the agent
+    // starts on "this page" — without touching the user's own tab.
+    let url = 'about:blank';
+    try {
+      const active = await liveActiveTab();
+      if (/^https?:/.test(active.url ?? '')) url = active.url!;
+    } catch { /* keep about:blank */ }
+    const created = await chrome.tabs.create({ url, active: true });
     if (created.id != null) await groupTab(created.id);
     return created;
   }
