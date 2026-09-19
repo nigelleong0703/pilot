@@ -26,33 +26,38 @@
 
 **1. The extension** — pick one:
 
-- **Chrome Web Store** *(coming soon)* — search **Pilot** and click *Add to Chrome*.
-- **From a release (no build):** download `pilot-<version>-chrome.zip` from the
-  [latest release](https://github.com/nigelleong0703/pilot/releases/latest), unzip it, then in
-  `chrome://extensions` turn on **Developer mode → Load unpacked** and pick the unzipped folder.
+- **One command** (downloads + unpacks the latest release):
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/nigelleong0703/pilot/main/scripts/install.sh | bash
+  ```
+  then `chrome://extensions` → **Developer mode → Load unpacked** → `~/.pilot/app/chrome-mv3`.
+- **Chrome Web Store** — *coming soon* (needs store review).
+- **Manual** — download `pilot-<version>-chrome.zip` from the
+  [latest release](https://github.com/nigelleong0703/pilot/releases/latest), unzip, then
+  **Load unpacked** the unzipped folder.
 - **From source:**
   ```bash
   git clone https://github.com/nigelleong0703/pilot.git && cd pilot
   npm install && npm run build     # -> .output/chrome-mv3 (load this folder)
   ```
 
-**2. The agent bridge + MCP server** (what actually controls the page):
+**2. The agent bridge (MCP server)** — one command (installs the `pilot-mcp` binary):
 
 ```bash
-cd mcp-server && npm install && npm run build
-# or, once published:  npx pilot-mcp
+npm install -g https://github.com/nigelleong0703/pilot/releases/latest/download/pilot-mcp-1.0.0.tgz
+# or from source:  cd mcp-server && npm install && npm run build
 ```
 
-**3. Connect your agent** — open the side panel and click **Connect Codex / OpenCode** (one click),
-or register manually:
+**3. Connect your agent** — open the side panel and click **Connect Codex / OpenCode**, or:
 
 ```bash
-codex    mcp add pilot -- node "<repo>/mcp-server/dist/index.js"
-claude   mcp add pilot --scope user -- node "<repo>/mcp-server/dist/index.js"
-opencode mcp add pilot -- node "<repo>/mcp-server/dist/index.js"
+codex    mcp add pilot --env PILOT_EXTENSION_PATH="$HOME/.pilot/app/chrome-mv3" -- pilot-mcp
+claude   mcp add pilot --scope user --env PILOT_EXTENSION_PATH="$HOME/.pilot/app/chrome-mv3" -- pilot-mcp
+opencode mcp add pilot -- pilot-mcp
 ```
 
-No browser needs to be open — Pilot launches one on first use.
+`PILOT_EXTENSION_PATH` lets the daemon auto-launch a browser with the extension when none is
+open. Restart the agent so it loads the MCP server. Verify with `codex mcp list` / `claude mcp list`.
 
 ---
 
