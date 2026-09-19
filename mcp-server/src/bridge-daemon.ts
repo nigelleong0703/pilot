@@ -600,19 +600,24 @@ class ChatManager {
     const id = agentId ?? 'claude';
     // A "custom" agent runs a command supplied by the side panel; everything
     // else comes from the built-in registry. Claude also honors a model choice.
+    // Agents that accept --model (opencode/qwen) get the side-panel model too.
     // BYO env/args are layered on top of whatever the agent's default spawn is.
+    const raw = id === 'custom' && cmd
+      ? () => ({ command: cmd, args: args ?? [], shell: win })
+      : agentDef(id).spawn;
+    const acceptsModel = id === 'opencode' || id === 'qwen';
+    const modelSpawn = () => {
+      const s = raw();
+      return model && acceptsModel ? { ...s, args: [...s.args, '--model', model] } : s;
+    };
     const def: AgentDef =
       id === 'custom' && cmd
-        ? {
-            spawn: withByo(id, () => ({ command: cmd, args: args ?? [], shell: win }), byo),
-            meta: genericMeta,
-            mcp: true,
-          }
-        : { ...agentDef(id), spawn: withByo(id, agentDef(id).spawn, byo) };
+        ? { spawn: withByo(id, modelSpawn, byo), meta: genericMeta, mcp: true }
+        : { ...agentDef(id), spawn: withByo(id, modelSpawn, byo) };
     const meta = id === 'claude' ? claudeMeta(model, effort) : def.meta();
-    // Key the client by command + effort, so editing either respawns the agent.
+    // Key the client by command + model + effort, so editing either respawns.
     const base = id === 'custom' ? `custom:${cmd} ${(args ?? []).join(' ')}` : id;
-    const key = `${base}:effort-${effort ?? 'medium'}`;
+    const key = `${base}:model-${model ?? ''}:effort-${effort ?? 'medium'}`;
     const client = await this.ensureClient(key, id, def);
     const mcpServers = def.mcp ? [this.browserMcp()] : [];
     const sessionId = await client.newSession(AGENT_CWD, mcpServers, meta);
@@ -637,7 +642,7 @@ class ChatManager {
             ? { spawn: () => ({ command: sess.cmd!, args: sess.args ?? [], shell: win }), meta: genericMeta, mcp: true }
             : agentDef(agentId);
         const base = agentId === 'custom' ? `custom:${sess?.cmd ?? ''} ${(sess?.args ?? []).join(' ')}` : agentId;
-        const key = `${base}:effort-${effort}`;
+        const key = `${base}:model-${sess?.model ?? modelHint ?? ''}:effort-${effort}`;
         const client = await this.ensureClient(key, agentId, def);
         await client.loadSession(sessionId, AGENT_CWD, def.mcp ? [this.browserMcp()] : []);
         this.live.add(sessionId);
@@ -795,6 +800,28 @@ class ChatManager {
     pushToExtension({ type: 'acp/agentStatus', status, mcpPath: INDEX_JS });
   }
 
+  /** List the models an agent exposes (e.g. `opencode models`) for the picker. */
+  agentModels(agentId: string) {
+    const cmds: Record<string, [string, string[]]> = {
+      opencode: [process.env.ACP_OPENCODE_CMD ?? 'opencode', ['models']],
+    };
+    const spec = cmds[agentId];
+    if (!spec) { pushToExtension({ type: 'acp/agentModels', agentId, models: [] }); return; }
+    let out = '';
+    let child;
+    try { child = spawn(spec[0], spec[1], { shell: win }); }
+    catch { pushToExtension({ type: 'acp/agentModels', agentId, models: [] }); return; }
+    child.stdout?.on('data', (d: Buffer) => { out += d.toString(); });
+    child.stderr?.on('data', (d: Buffer) => { out += d.toString(); });
+    const done = () => {
+      const models = out.split('\n').map((s) => s.trim())
+        .filter((s) => /^[\w.-]+\/[\w.:-]+$/.test(s));
+      pushToExtension({ type: 'acp/agentModels', agentId, models });
+    };
+    child.on('error', done);
+    child.on('close', done);
+  }
+
   /** Run the agent's installer in-app, streaming output back to the picker. */
   installAgent(agentId: string) {
     const inst = AGENT_INSTALL[agentId];
@@ -887,6 +914,7 @@ async function handleAcpMessage(msg: any) {
       case 'acp/renameSkill': chat.renameSkill(msg.id, msg.name); break;
       case 'acp/loadSession': chat.loadSession(msg.sessionId); break;
       case 'acp/agentStatus': chat.agentStatus(); break;
+      case 'acp/agentModels': chat.agentModels(msg.agentId); break;
       case 'acp/connectAgent': connectAgent(msg.agentId); break;
       case 'acp/installAgent': chat.installAgent(msg.agentId); break;
       case 'acp/skillFromRecording': await chat.skillFromRecording(msg.sessionId, msg.steps); break;

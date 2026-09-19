@@ -232,6 +232,97 @@ export async function cdpSelectOption(tabId: number, params: Record<string, unkn
   return { selected: r?.result?.value };
 }
 
+/** Click at a viewport coordinate (vision/coordinate fallback when the DOM/a11y
+ *  can't identify the element — canvas, exotic SPAs, cross-origin UI). */
+export async function cdpClickAt(tabId: number, x: number, y: number): Promise<unknown> {
+  await ensureAttached(tabId);
+  await showCursor(tabId, { x: x - 11, y: y - 11, width: 22, height: 22 }, 'click');
+  await sleep(200);
+  await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  await send(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+  await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  await sleep(400);
+  return { clickedAt: { x, y } };
+}
+
+/** Type text into whatever is focused (pair with cdpClickAt for coordinate flows). */
+export async function cdpTypeText(tabId: number, text: string, submit = false): Promise<unknown> {
+  await ensureAttached(tabId);
+  await send(tabId, 'Input.insertText', { text });
+  if (submit) {
+    for (const type of ['keyDown', 'keyUp'] as const) {
+      await send(tabId, 'Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+    }
+  }
+  return { typed: text };
+}
+
+/** Press a single key (Enter/Tab/Escape/arrows/…). */
+export async function cdpKey(tabId: number, key: string): Promise<unknown> {
+  await ensureAttached(tabId);
+  const defs: Record<string, { key: string; code: string; vk: number }> = {
+    Enter: { key: 'Enter', code: 'Enter', vk: 13 },
+    Tab: { key: 'Tab', code: 'Tab', vk: 9 },
+    Escape: { key: 'Escape', code: 'Escape', vk: 27 },
+    Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
+    Delete: { key: 'Delete', code: 'Delete', vk: 46 },
+    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
+    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
+    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
+    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
+    PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
+    PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
+    Home: { key: 'Home', code: 'Home', vk: 36 },
+    End: { key: 'End', code: 'End', vk: 35 },
+    Space: { key: ' ', code: 'Space', vk: 32 },
+  };
+  const d = defs[key] ?? { key, code: key, vk: 0 };
+  await send(tabId, 'Input.dispatchKeyEvent', {
+    type: 'keyDown', key: d.key, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk,
+  });
+  await send(tabId, 'Input.dispatchKeyEvent', {
+    type: 'keyUp', key: d.key, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk,
+  });
+  return { pressed: key };
+}
+
+/** Scroll the page (mouse wheel at x,y). */
+export async function cdpScroll(tabId: number, x: number, y: number, dy: number, dx = 0): Promise<unknown> {
+  await ensureAttached(tabId);
+  await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
+  await sleep(150);
+  return { scrolled: { dy, dx } };
+}
+
+/** Overlay a labelled coordinate grid (set via a marker) so a screenshot shows
+ *  pixel coordinates. CSP-safe (DOM + CSSOM only). */
+const GRID_JS = `(function(){
+  var id='__pilot_grid'; var old=document.getElementById(id); if(old) old.remove();
+  var layer=document.createElement('div'); layer.id=id;
+  layer.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
+  var w=window.innerWidth, h=window.innerHeight, step=100;
+  function label(x,y,txt){ var s=document.createElement('span'); s.textContent=txt;
+    s.style.cssText='position:absolute;left:'+x+'px;top:'+y+'px;font:10px/1 ui-monospace,monospace;color:#e11;background:rgba(255,255,255,.75);padding:0 2px;';
+    layer.appendChild(s); }
+  for(var x=0;x<=w;x+=step){ var v=document.createElement('div');
+    v.style.cssText='position:absolute;top:0;bottom:0;left:'+x+'px;border-left:1px solid rgba(220,20,20,.55);';
+    layer.appendChild(v); label(x+2,2,String(x)); }
+  for(var y=0;y<=h;y+=step){ var hz=document.createElement('div');
+    hz.style.cssText='position:absolute;left:0;right:0;top:'+y+'px;border-top:1px solid rgba(220,20,20,.55);';
+    layer.appendChild(hz); label(2,y+2,String(y)); }
+  document.documentElement.appendChild(layer);
+})()`;
+
+/** CDP screenshot of the tab, optionally with a coordinate grid overlay. */
+export async function cdpScreenshot(tabId: number, grid = false): Promise<{ dataUrl: string }> {
+  await ensureAttached(tabId);
+  if (grid) await send(tabId, 'Runtime.evaluate', { expression: GRID_JS }).catch(() => {});
+  const r = await send(tabId, 'Page.captureScreenshot', { format: 'png' }).catch(() => null);
+  if (grid) await send(tabId, 'Runtime.evaluate', { expression: 'var e=document.getElementById("__pilot_grid"); if(e) e.remove();' }).catch(() => {});
+  if (!r?.data) throw new Error('screenshot failed');
+  return { dataUrl: `data:image/png;base64,${r.data}` };
+}
+
 export async function cdpGetText(tabId: number): Promise<unknown> {
   await ensureAttached(tabId);
   const read = async (contextId?: number) => {

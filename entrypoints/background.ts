@@ -4,7 +4,7 @@ import {
   type PageCommand,
   type PageMethod,
 } from '../lib/protocol';
-import { cdpSnapshot, cdpClick, cdpType, cdpSelectOption, cdpGetText, detach as cdpDetach } from '../lib/cdp';
+import { cdpSnapshot, cdpClick, cdpType, cdpSelectOption, cdpGetText, cdpClickAt, cdpTypeText, cdpKey, cdpScroll, cdpScreenshot, detach as cdpDetach } from '../lib/cdp';
 
 export interface RecordedStep {
   id: number;
@@ -379,6 +379,7 @@ export default defineBackground(() => {
 
   const PAGE_METHODS = new Set([
     'navigate', 'snapshot', 'click', 'type', 'selectOption', 'getText', 'screenshot', 'replay', 'newTab',
+    'clickAt', 'typeText', 'key', 'scroll',
   ]);
 
   // ── Deterministic replay ─────────────────────────────────────────────────
@@ -560,9 +561,31 @@ export default defineBackground(() => {
       }
       case 'screenshot': {
         const tab = await resolveTab(p);
+        const cdp = await pageModeIsCdp();
+        if (cdp) {
+          try { return await cdpScreenshot(tab.id!, !!p.grid); } catch { /* fall back */ }
+        }
         const dataUrl = await captureScreenshot(tab.windowId);
         if (!dataUrl) throw new Error('Screenshot failed');
         return { dataUrl };
+      }
+      case 'clickAt': {
+        const tab = await resolveTab(p);
+        return cdpClickAt(tab.id!, Number(p.x), Number(p.y));
+      }
+      case 'typeText': {
+        const tab = await resolveTab(p);
+        return cdpTypeText(tab.id!, String(p.text ?? ''), !!p.submit);
+      }
+      case 'key': {
+        const tab = await resolveTab(p);
+        return cdpKey(tab.id!, String(p.key ?? 'Enter'));
+      }
+      case 'scroll': {
+        const tab = await resolveTab(p);
+        const x = Number(p.x ?? 0) || 200;
+        const y = Number(p.y ?? 0) || 300;
+        return cdpScroll(tab.id!, x, y, Number(p.dy ?? 0), Number(p.dx ?? 0));
       }
       case 'snapshot':
       case 'click':

@@ -776,12 +776,14 @@ function SettingsPage({ bridge }: { bridge: boolean }) {
   const [connected, setConnected] = useState<string | null>(null);
   const [showAllAgents, setShowAllAgents] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
 
   useEffect(() => {
     const onMsg = (msg: any) => {
       const p = msg?.kind === 'ACP_UPDATE' ? msg.payload : null;
       if (!p) return;
-      if (p.type === 'acp/installStarted') {
+      if (p.type === 'acp/agentModels') setModels(p.models ?? []);
+      else if (p.type === 'acp/installStarted') {
         setInst({ agentId: p.agentId, log: [], error: null });
       } else if (p.type === 'acp/installLog') {
         setInst((prev) => (prev.agentId === p.agentId ? { ...prev, log: [...prev.log, p.line] } : prev));
@@ -800,6 +802,12 @@ function SettingsPage({ bridge }: { bridge: boolean }) {
     chrome.runtime.onMessage.addListener(onMsg);
     return () => chrome.runtime.onMessage.removeListener(onMsg);
   }, []);
+
+  // Fetch the model list for agents that expose one (e.g. `opencode models`).
+  useEffect(() => {
+    if (s?.agentId === 'opencode') acp({ type: 'acp/agentModels', agentId: 'opencode' });
+    else setModels([]);
+  }, [s?.agentId]);
 
   const apply = (patch: Parameters<typeof update>[0]) => {
     void update(patch);
@@ -833,6 +841,16 @@ function SettingsPage({ bridge }: { bridge: boolean }) {
           {AGENTS.map((a) => (<option key={a.id} value={a.id}>{a.label}</option>))}
         </select>
         {active && <p className="mt-1.5 text-xs text-muted-foreground">{active.hint}</p>}
+
+        {s.agentId === 'opencode' && models.length > 0 && (
+          <label className="mt-3 block">
+            <span className="mb-1 block text-[11px] text-muted-foreground">Model</span>
+            <select value={s.model} onChange={(e) => apply({ model: e.target.value })} className={selectCls}>
+              <option value="">Default</option>
+              {models.map((m) => (<option key={m} value={m}>{m}</option>))}
+            </select>
+          </label>
+        )}
 
         {s.agentId === 'custom' && (
           <div className="mt-3 space-y-2">

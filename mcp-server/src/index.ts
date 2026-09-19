@@ -389,16 +389,81 @@ server.registerTool(
   'browser_screenshot',
   {
     title: 'Screenshot',
-    description: 'Capture a JPEG screenshot of a tab viewport.',
+    description:
+      'Capture a screenshot of a tab viewport. Set `grid:true` to overlay a labelled ' +
+      '100px coordinate grid — use it to read pixel coordinates for browser_click_at.',
     inputSchema: {
+      grid: z.boolean().optional().describe('Overlay a coordinate grid (labelled every 100px)'),
       tabId: z.number().int().optional().describe('Tab to capture (defaults to active Pilot tab)'),
     },
   },
-  async ({ tabId }) => {
-    const { dataUrl } = (await call('screenshot', { tabId })) as { dataUrl: string };
-    const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    return { content: [{ type: 'image' as const, data: base64, mimeType: 'image/jpeg' }] };
+  async ({ grid, tabId }) => {
+    const { dataUrl } = (await call('screenshot', { grid, tabId })) as { dataUrl: string };
+    const m = /^data:(image\/\w+);base64,(.*)$/.exec(dataUrl) ?? [];
+    const mime = m[1] ?? 'image/png';
+    const base64 = m[2] ?? dataUrl;
+    return { content: [{ type: 'image' as const, data: base64, mimeType: mime }] };
   },
+);
+
+server.registerTool(
+  'browser_click_at',
+  {
+    title: 'Click at coordinates',
+    description:
+      'Click at a viewport pixel coordinate (x,y). Vision/coordinate fallback for pages where ' +
+      'the DOM/a11y/a snapshot can\'t identify the element (canvas, complex SPAs, cross-origin UI). ' +
+      'Take a screenshot with `grid:true` first to read the coordinates.',
+    inputSchema: {
+      x: z.number().describe('X in CSS pixels from the viewport top-left'),
+      y: z.number().describe('Y in CSS pixels from the viewport top-left'),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ x, y, tabId }) => asText(await call('clickAt', { x, y, tabId })),
+);
+
+server.registerTool(
+  'browser_key',
+  {
+    title: 'Press a key',
+    description: 'Press a keyboard key on the focused element (Enter, Tab, Escape, ArrowUp/Down/Left/Right, PageUp/PageDown, Home, End, Backspace, Space…).',
+    inputSchema: {
+      key: z.string().describe('Key name, e.g. "Enter", "Tab", "Escape", "ArrowDown"'),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ key, tabId }) => asText(await call('key', { key, tabId })),
+);
+
+server.registerTool(
+  'browser_type_text',
+  {
+    title: 'Type into focused element',
+    description: 'Insert text into whatever element is currently focused (pair with browser_click_at for coordinate flows). Optional `submit` presses Enter.',
+    inputSchema: {
+      text: z.string(),
+      submit: z.boolean().optional(),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ text, submit, tabId }) => asText(await call('typeText', { text, submit, tabId })),
+);
+
+server.registerTool(
+  'browser_scroll',
+  {
+    title: 'Scroll',
+    description: 'Scroll the page with a mouse wheel at (x,y) (default 200,300). Positive dy scrolls down.',
+    inputSchema: {
+      dy: z.number().describe('Vertical delta in pixels (positive = down)'),
+      dx: z.number().optional().describe('Horizontal delta in pixels'),
+      x: z.number().optional().describe('Wheel X in viewport pixels'),
+      y: z.number().optional().describe('Wheel Y in viewport pixels'),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ dy, dx, x, y, tabId }) => asText(await call('scroll', { dy, dx, x, y, tabId })),
 );
 
 server.registerTool(
