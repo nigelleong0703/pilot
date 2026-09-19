@@ -1,0 +1,10 @@
+const ctx = await mcp('pageContext', {});
+console.log('ctx:', JSON.stringify(ctx?.result));
+await sleep(1000);
+const snap = await mcp('snapshot', {});
+const ns = snap?.result?.nodes ?? [];
+console.log('nodes:', ns.length);
+console.log(ns.slice(0, 30).map((n) => `${n.ref}:${n.role}:${(n.label||'').slice(0,40)}`).join(' | '));
+const txt = await mcp('getText', {});
+console.log('textlen:', (txt?.result?.text ?? '').length, '|', (txt?.result?.text ?? '').replace(/\s+/g,' ').slice(0,200));
+process.exit(0);

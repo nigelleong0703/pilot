@@ -70,6 +70,7 @@ export async function ensureAttached(tabId: number): Promise<void> {
   attached.add(tabId);
   await send(tabId, 'DOM.enable').catch(() => {});
   await send(tabId, 'Accessibility.enable').catch(() => {});
+  await send(tabId, 'Page.enable').catch(() => {});
 }
 
 export function detach(tabId: number) {
@@ -86,12 +87,22 @@ const INTERACTIVE = new Set([
 
 export async function cdpSnapshot(tabId: number): Promise<{ url: string; title: string; nodes: any[] }> {
   await ensureAttached(tabId);
-  const { nodes } = await send(tabId, 'Accessibility.getFullAXTree');
+  // Main frame + every iframe (many apps — e.g. Google consoles — render in frames).
+  let all: any[] = [];
+  const main = await send(tabId, 'Accessibility.getFullAXTree').catch(() => null);
+  all = all.concat(main?.nodes ?? []);
+  for (const frameId of await frameIds(tabId)) {
+    const r = await send(tabId, 'Accessibility.getFullAXTree', { frameId }).catch(() => null);
+    all = all.concat(r?.nodes ?? []);
+  }
+  const seen = new Set<string>();
   const map = new Map<number, number>();
   const out: any[] = [];
   let ref = 1;
-  for (const n of nodes ?? []) {
-    if (n.ignored) continue;
+  for (const n of all) {
+    if (!n || n.ignored) continue;
+    if (n.nodeId && seen.has(n.nodeId)) continue;
+    if (n.nodeId) seen.add(n.nodeId);
     const role = n.role?.value;
     if (!role || !INTERACTIVE.has(role)) continue;
     if (n.backendDOMNodeId == null) continue;
@@ -113,6 +124,19 @@ export async function cdpSnapshot(tabId: number): Promise<{ url: string; title: 
     title = parsed[1] ?? '';
   } catch { /* ignore */ }
   return { url, title, nodes: out };
+}
+
+/** Ids of all child frames (any depth) of the main frame. */
+async function frameIds(tabId: number): Promise<string[]> {
+  try {
+    const { frameTree } = await send(tabId, 'Page.getFrameTree');
+    const ids: string[] = [];
+    const walk = (f: any) => { for (const c of f.childFrames ?? []) { ids.push(c.frame.id); walk(c); } };
+    walk(frameTree);
+    return ids;
+  } catch {
+    return [];
+  }
 }
 
 async function resolveBackend(tabId: number, params: Record<string, unknown>): Promise<number> {
@@ -210,6 +234,21 @@ export async function cdpSelectOption(tabId: number, params: Record<string, unkn
 
 export async function cdpGetText(tabId: number): Promise<unknown> {
   await ensureAttached(tabId);
-  const r = await send(tabId, 'Runtime.evaluate', { expression: 'document.body ? document.body.innerText : ""', returnByValue: true });
-  return { text: String(r?.result?.value ?? '').slice(0, 20_000) };
+  const read = async (contextId?: number) => {
+    const r = await send(tabId, 'Runtime.evaluate', {
+      expression: 'document.body ? document.body.innerText : ""',
+      returnByValue: true,
+      ...(contextId != null ? { contextId } : {}),
+    }).catch(() => null);
+    return String(r?.result?.value ?? '');
+  };
+  let text = await read();
+  // Include iframe content (e.g. Google consoles render inside frames).
+  for (const frameId of await frameIds(tabId)) {
+    const w = await send(tabId, 'Page.createIsolatedWorld', {
+      frameId, worldName: 'pilot_read', grantUniveralAccess: true,
+    }).catch(() => null);
+    if (w?.executionContextId != null) text += '\n' + (await read(w.executionContextId));
+  }
+  return { text: text.slice(0, 20_000) };
 }
