@@ -24,6 +24,8 @@ export interface RecordedStep {
 type UiMessage =
   | { type: 'START' }
   | { type: 'STOP' }
+  | { type: 'PAUSE' }
+  | { type: 'RESUME' }
   | { type: 'CLEAR' }
   | { type: 'GET_STATE' }
   | { type: 'NOTE'; text: string };
@@ -32,6 +34,7 @@ type PageEvent = { type: 'USER_EVENT'; payload: Omit<RecordedStep, 'id'> };
 
 export default defineBackground(() => {
   let isRecording = false;
+  let isPaused = false;
   let recordedEvents: RecordedStep[] = [];
   let nextId = 1;
   let bridgeConnected = false;
@@ -64,6 +67,7 @@ export default defineBackground(() => {
 
   function startRecording(message = '') {
     isRecording = true;
+    isPaused = false;
     recordedEvents = [];
     nextId = 1;
     promptMessage = message;
@@ -73,6 +77,7 @@ export default defineBackground(() => {
   }
   function stopRecording() {
     isRecording = false;
+    isPaused = false;
     promptMessage = '';
     updateBadge();
     broadcastState();
@@ -113,7 +118,7 @@ export default defineBackground(() => {
 
   function broadcastState() {
     chrome.runtime
-      .sendMessage({ type: 'STATE', isRecording, steps: recordedEvents, bridgeConnected, promptMessage })
+      .sendMessage({ type: 'STATE', isRecording, paused: isPaused, steps: recordedEvents, bridgeConnected, promptMessage })
       .catch(() => {});
   }
 
@@ -224,6 +229,19 @@ export default defineBackground(() => {
     return (tabs ?? [])
       .filter((t) => t.id != null)
       .map((t) => ({ tabId: t.id!, url: t.url ?? '', title: t.title ?? '', active: !!t.active }));
+  }
+
+  /** The tab Pilot drives: reuse the Pilot-group tab, else open a fresh one. */
+  async function ensurePilotTab(): Promise<chrome.tabs.Tab> {
+    const groupId = await pilotGroupId();
+    if (groupId != null) {
+      const tabs = await chrome.tabs.query({ groupId });
+      const t = tabs.find((x) => x.id != null);
+      if (t) return t;
+    }
+    const created = await chrome.tabs.create({ url: 'about:blank', active: true });
+    if (created.id != null) await groupTab(created.id);
+    return created;
   }
 
   /** Remove every tab from the Pilot group (called on a new chat). */
@@ -362,8 +380,71 @@ export default defineBackground(() => {
   }
 
   const PAGE_METHODS = new Set([
-    'navigate', 'snapshot', 'click', 'type', 'selectOption', 'getText', 'screenshot',
+    'navigate', 'snapshot', 'click', 'type', 'selectOption', 'getText', 'screenshot', 'replay',
   ]);
+
+  // ── Deterministic replay ─────────────────────────────────────────────────
+  // Recorded skills run as one call. Each target is tried by its saved
+  // selector first, then re-found by label via a fresh snapshot — so a stale
+  // selector doesn't kill the whole run.
+  async function replayByLabel(tabId: number, label: unknown): Promise<Record<string, unknown>> {
+    const snap = (await forwardToTab('snapshot', {}, tabId)) as { nodes?: Array<{ ref: number; label: string }> };
+    const nodes = snap?.nodes ?? [];
+    const want = String(label ?? '').toLowerCase();
+    const hit =
+      nodes.find((n) => String(n.label).toLowerCase() === want) ??
+      nodes.find((n) => want && String(n.label).toLowerCase().includes(want));
+    if (!hit) throw new Error(`element not found: ${label ?? '?'}`);
+    return { ref: hit.ref };
+  }
+
+  /** Run one replay action, falling back from selector to label lookup. */
+  async function replayAct(
+    tabId: number,
+    a: Record<string, unknown>,
+    method: 'click' | 'type' | 'selectOption',
+    extra: Record<string, unknown>,
+  ): Promise<void> {
+    if (typeof a.sel === 'string' && a.sel) {
+      try {
+        await forwardToTab(method, { selector: a.sel, ...extra }, tabId);
+        return;
+      } catch { /* stale selector → try by label */ }
+    }
+    const t = await replayByLabel(tabId, a.el);
+    await forwardToTab(method, { ...t, ...extra }, tabId);
+  }
+
+  async function runReplay(tabId: number, actions: Array<Record<string, unknown>>): Promise<unknown> {
+    const results: Array<Record<string, unknown>> = [];
+    for (const a of actions) {
+      try {
+        const act = String(a.act ?? '');
+        if (act === 'navigate') {
+          await chrome.tabs.update(tabId, { url: String(a.to ?? '') });
+          await waitForTabComplete(tabId);
+          await ensureContentScript(tabId);
+        } else if (act === 'click') {
+          await replayAct(tabId, a, 'click', {});
+        } else if (act === 'input') {
+          await replayAct(tabId, a, 'type', { text: String(a.value ?? ''), submit: !!a.submit });
+        } else if (act === 'change') {
+          try {
+            await replayAct(tabId, a, 'selectOption', { text: String(a.value ?? '') });
+          } catch {
+            await replayAct(tabId, a, 'type', { text: String(a.value ?? '') });
+          }
+        } else {
+          throw new Error(`unknown action: ${act}`);
+        }
+        results.push({ act, ok: true });
+      } catch (e) {
+        results.push({ act: String(a.act ?? ''), ok: false, error: String((e as Error)?.message ?? e) });
+        break;
+      }
+    }
+    return { results };
+  }
 
   async function dispatch(req: BridgeRequest): Promise<unknown> {
     const p = req.params ?? {};
@@ -377,6 +458,11 @@ export default defineBackground(() => {
         // Pilot group. Falls back to the active tab so single-tab use still works.
         const tabs = await groupTabs();
         return { group: 'Pilot', tabs };
+      }
+      case 'replay': {
+        const tab = await resolveTab(p);
+        const actions = Array.isArray(p.actions) ? (p.actions as Array<Record<string, unknown>>) : [];
+        return runReplay(tab.id!, actions);
       }
       case 'navigate': {
         const tab = await resolveTab(p);
@@ -468,11 +554,11 @@ export default defineBackground(() => {
 
     // ── Pin the current tab for the duration of a turn ──
     if ((message as { type?: string }).type === 'PIN_TAB') {
-      liveActiveTab()
+      // Pilot works in its OWN tab (reused across the session), so the turn
+      // never hijacks whatever tab the user is currently on.
+      ensurePilotTab()
         .then(async (t) => {
           pinnedTabId = t.id ?? null;
-          // Persistent per-session group: the tab stays in the Pilot group
-          // after the turn ends (Claude-style) until a new chat clears it.
           if (t.id != null) await groupTab(t.id);
           sendResponse({ tabId: t.id ?? null, url: t.url ?? '', title: t.title ?? '' });
         })
@@ -480,9 +566,9 @@ export default defineBackground(() => {
       return true; // async response
     }
     if ((message as { type?: string }).type === 'UNPIN_TAB') {
+      // Keep the Pilot tab pinned for the whole session (like the tab group);
+      // just stop the "controlling" glow. A new chat clears the pin.
       clearAgentActive(pinnedTabId);
-      pinnedTabId = null;
-      liveActiveTab().then((t) => broadcastActiveTab(t)).catch(() => {});
       return;
     }
     // ── A new chat starts: clear the Pilot tab group for a fresh session ──
@@ -502,12 +588,14 @@ export default defineBackground(() => {
       switch ((message as UiMessage).type) {
         case 'START':    startRecording(); sendResponse({ ok: true, isRecording }); return;
         case 'STOP':     stopRecording();  sendResponse({ ok: true, isRecording }); return;
+        case 'PAUSE':    isPaused = true;  broadcastState(); sendResponse({ ok: true, paused: isPaused }); return;
+        case 'RESUME':   isPaused = false; broadcastState(); sendResponse({ ok: true, paused: isPaused }); return;
         case 'CLEAR':    clearRecording(); sendResponse({ ok: true });              return;
         case 'GET_STATE':
-          sendResponse({ ok: true, isRecording, steps: recordedEvents, bridgeConnected, promptMessage });
+          sendResponse({ ok: true, isRecording, paused: isPaused, steps: recordedEvents, bridgeConnected, promptMessage });
           return;
         case 'NOTE': {
-          if (isRecording) {
+          if (isRecording && !isPaused) {
             const noteMsg = message as { type: 'NOTE'; text: string };
             const step: RecordedStep = {
               id: nextId++,
@@ -533,7 +621,7 @@ export default defineBackground(() => {
     }
 
     if ((message as PageEvent).type === 'USER_EVENT') {
-      if (isRecording) {
+      if (isRecording && !isPaused) {
         const ev = message as PageEvent;
         const windowId = sender.tab?.windowId;
         const step: RecordedStep = { id: nextId++, ...ev.payload };

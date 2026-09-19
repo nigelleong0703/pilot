@@ -16,7 +16,13 @@ export interface Skill {
   description: string;
   inputs: string[];
   steps: string[];
+  /** Deterministic replay actions (recorded) — run in one call, no model. */
+  actions?: unknown[];
+  /** Bumped on every update; old revisions are archived under .versions/. */
+  version: number;
   createdAt: number;
+  updatedAt: number;
+  changelog: Array<{ version: number; at: number; note?: string; source?: string }>;
 }
 
 const HOME = homedir();
@@ -28,8 +34,16 @@ function slug(name: string): string {
 
 function frontmatterMd(s: Skill): string {
   const inputs = s.inputs.length ? `## Inputs\n${s.inputs.map((i) => `- ${i}`).join('\n')}\n\n` : '';
-  const steps = `## Steps\n${s.steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
-  return `---\nname: ${s.name}\ndescription: ${s.description}\n---\n\n# ${s.name}\n\n${s.description}\n\n${inputs}${steps}`;
+  const acts = (s.actions ?? []) as Array<{ why?: string; live?: boolean }>;
+  const steps = `## Steps\n${s.steps
+    .map((x, i) => {
+      const a = acts[i] ?? {};
+      const why = a.why ? ` — ${a.why}` : '';
+      const live = a.live ? ' _(needs live check — re-inspect the page)_' : '';
+      return `${i + 1}. ${x}${why}${live}`;
+    })
+    .join('\n')}\n`;
+  return `---\nname: ${s.name}\ndescription: ${s.description}\nversion: ${s.version}\n---\n\n# ${s.name}\n\n${s.description} _(v${s.version})_\n\n${inputs}${steps}`;
 }
 export interface ClientTarget { id: string; label: string; write: (s: Skill) => string; }
 
@@ -63,21 +77,51 @@ export function detectClients(): ClientTarget[] {
 export class SkillStore {
   constructor() { mkdirSync(CANON, { recursive: true }); }
 
-  save(input: { id?: string; name: string; description?: string; inputs?: string[]; steps: string[] }): { skill: Skill; exportedTo: string[] } {
+  /** Create or update a skill. Updating bumps the version and archives the old copy. */
+  save(input: {
+    id?: string; name: string; description?: string; inputs?: string[];
+    steps: string[]; actions?: unknown[]; note?: string; source?: string;
+  }): { skill: Skill; exportedTo: string[] } {
+    const now = Date.now();
+    const existing = input.id ? this.get(input.id) : null;
+    const prevVersion = existing?.version ?? 0;
+    if (existing) this.archive(existing.id, prevVersion, existing);
+    const version = prevVersion + 1;
     const skill: Skill = {
-      id: input.id ?? `${slug(input.name)}-${Date.now().toString(36)}`,
+      id: input.id ?? `${slug(input.name)}-${now.toString(36)}`,
       name: input.name,
-      description: input.description ?? '',
-      inputs: input.inputs ?? [],
-      steps: input.steps ?? [],
-      createdAt: Date.now(),
+      description: input.description ?? existing?.description ?? '',
+      inputs: input.inputs ?? existing?.inputs ?? [],
+      steps: input.steps ?? existing?.steps ?? [],
+      ...(input.actions ? { actions: input.actions } : existing?.actions ? { actions: existing.actions } : {}),
+      version,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      changelog: [
+        ...(existing?.changelog ?? []),
+        { version, at: now, note: input.note ?? (existing ? 'updated' : 'created'), source: input.source },
+      ],
     };
     writeFileSync(join(CANON, `${skill.id}.json`), JSON.stringify(skill, null, 2), 'utf8');
+    return { skill, exportedTo: this.export(skill) };
+  }
+
+  /** Write the skill to every detected harness. */
+  private export(skill: Skill): string[] {
     const exportedTo: string[] = [];
     for (const c of detectClients()) {
       try { c.write(skill); exportedTo.push(c.label); } catch { /* skip */ }
     }
-    return { skill, exportedTo };
+    return exportedTo;
+  }
+
+  /** Archive a revision under .versions/<id>/v<n>.json (best effort). */
+  private archive(id: string, version: number, skill: Skill): void {
+    try {
+      const dir = join(CANON, '.versions', id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `v${version || 1}.json`), JSON.stringify(skill, null, 2), 'utf8');
+    } catch { /* skip */ }
   }
 
   list(): Skill[] {
@@ -85,15 +129,33 @@ export class SkillStore {
     const out: Skill[] = [];
     for (const f of readdirSync(CANON)) {
       if (!f.endsWith('.json')) continue;
-      try { out.push(JSON.parse(readFileSync(join(CANON, f), 'utf8')) as Skill); } catch { /* skip */ }
+      try {
+        const s = JSON.parse(readFileSync(join(CANON, f), 'utf8')) as Skill;
+        s.version ??= 1;
+        s.changelog ??= [];
+        out.push(s);
+      } catch { /* skip */ }
     }
-    return out.sort((a, b) => b.createdAt - a.createdAt);
+    return out.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   get(id: string): Skill | null {
     const f = join(CANON, `${id}.json`);
     if (!existsSync(f)) return null;
-    try { return JSON.parse(readFileSync(f, 'utf8')) as Skill; } catch { return null; }
+    try {
+      const s = JSON.parse(readFileSync(f, 'utf8')) as Skill;
+      s.version ??= 1;
+      s.changelog ??= [];
+      return s;
+    } catch { return null; }
+  }
+
+  /** Find a skill by exact name or id (case-insensitive name). */
+  find(nameOrId: string): Skill | null {
+    return this.get(nameOrId)
+      ?? this.list().find((s) => s.name === nameOrId)
+      ?? this.list().find((s) => s.name.toLowerCase() === nameOrId.toLowerCase())
+      ?? null;
   }
 
   /** Remove a skill and its exported copies (best effort). */
@@ -112,16 +174,13 @@ export class SkillStore {
     return true;
   }
 
-  /** Rename a skill in place and re-export it. */
+  /** Rename a skill in place (bumps version) and re-export it. */
   rename(id: string, name: string): { skill: Skill; exportedTo: string[] } | null {
     const s = this.get(id);
     if (!s || !name.trim()) return null;
-    const skill: Skill = { ...s, name: name.trim() };
-    writeFileSync(join(CANON, `${id}.json`), JSON.stringify(skill, null, 2), 'utf8');
-    const exportedTo: string[] = [];
-    for (const c of detectClients()) {
-      try { c.write(skill); exportedTo.push(c.label); } catch { /* skip */ }
-    }
-    return { skill, exportedTo };
+    return this.save({
+      id, name: name.trim(), description: s.description, inputs: s.inputs,
+      steps: s.steps, actions: s.actions, note: 'renamed',
+    });
   }
 }

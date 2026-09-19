@@ -2,14 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { PlusIcon, SparklesIcon, FileTextIcon, ImageIcon, ChevronRightIcon } from 'lucide-react';
 import { cn } from '../lib/utils';
-
-interface Skill { id: string; name: string; description?: string; inputs?: string[]; steps?: string[] }
-interface Command { name: string; description?: string }
-
-/** Fire text into the current chat thread (App/Chat listens for this). */
-function run(text: string) {
-  window.dispatchEvent(new CustomEvent('pilot:run', { detail: text }));
-}
+import { runText, fireSkill, type Skill, type AgentCommand as Command } from '../lib/skill-run';
 
 /**
  * Composer "+" menu: pick a Skill (recorded here or native to the current agent
@@ -34,32 +27,8 @@ export function PlusMenu() {
 
   const refresh = () => chrome.runtime.sendMessage({ kind: 'ACP_SEND', payload: { type: 'acp/listSkills' } }).catch(() => {});
 
-  function fireSkill(s: Skill) {
-    // Skills that declare inputs prompt for their values and substitute
-    // {{input}} placeholders into the steps before running.
-    const inputs = (s.steps ?? [])
-      .flatMap((x) => Array.from(x.matchAll(/\{\{\s*([a-z0-9_ -]+)\s*\}\}/gi), (m) => m[1]!.trim()))
-      .filter((v, i, a) => a.indexOf(v) === i)
-      .filter((v) => !(s.inputs ?? []).includes(v)); // declared inputs prompt first
-    const values: Record<string, string> = {};
-    for (const name of (s.inputs ?? [])) {
-      const v = window.prompt(`Value for "${name}":`, '');
-      if (v == null) return; // cancelled
-      values[name] = v;
-    }
-    for (const name of inputs) {
-      const v = window.prompt(`Value for "${name}" (used by the skill):`, '');
-      if (v == null) return; // cancelled
-      values[name] = v;
-    }
-    const steps = (s.steps ?? [])
-      .map((x) => x.replace(/\{\{\s*([a-z0-9_ -]+)\s*\}\}/gi, (_, k) => values[k] ?? `{{${k}}}`))
-      .map((x, i) => `${i + 1}. ${x}`)
-      .join('\n');
-    run(`Run the "${s.name}" skill${steps ? `:\n${steps}` : '.'}`);
-  }
   function fireCommand(c: Command) {
-    run(`/${c.name}`);
+    runText(`/${c.name}`);
   }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -68,7 +37,7 @@ export function PlusMenu() {
     if (!file) return;
     const text = await file.text().catch(() => '');
     const clipped = text.length > 12000 ? text.slice(0, 12000) + '\n…(truncated)' : text;
-    run(`Here is a document "${file.name}":\n\n\`\`\`\n${clipped}\n\`\`\``);
+    runText(`Here is a document "${file.name}":\n\n\`\`\`\n${clipped}\n\`\`\``);
   }
 
   async function onImage(e: React.ChangeEvent<HTMLInputElement>) {

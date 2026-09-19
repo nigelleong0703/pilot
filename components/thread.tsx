@@ -34,6 +34,7 @@ import {
   type FileMessagePartComponent,
   type ImageMessagePartComponent,
   type ToolCallMessagePartComponent,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -48,15 +49,19 @@ import {
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
+  SparklesIcon,
   SquareIcon,
 } from "lucide-react";
 import {
   createContext,
   useContext,
+  useEffect,
+  useState,
   type ComponentType,
   type FC,
   type PropsWithChildren,
 } from "react";
+import { runText, skillToRunText } from "@/lib/skill-run";
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
@@ -257,6 +262,7 @@ const Composer: FC = () => {
           className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full cursor-text flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) transition-[border-color] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]"
         >
           <ComposerAttachments />
+          <SlashMenu />
           <ComposerPrimitive.Input
             placeholder="Send a message..."
             className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
@@ -269,6 +275,95 @@ const Composer: FC = () => {
         </div>
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
+  );
+};
+
+const SlashMenu: FC = () => {
+  const text = useAuiState((s) => s.composer.text);
+  const aui = useAui();
+  const [skills, setSkills] = useState<Array<{ id: string; name: string; description?: string; inputs?: string[]; steps?: string[] }>>([]);
+  const [commands, setCommands] = useState<Array<{ name: string; description?: string }>>([]);
+  const [sel, setSel] = useState(0);
+
+  useEffect(() => {
+    const onMsg = (m: any) => {
+      if (m?.kind === "ACP_UPDATE" && m.payload?.type === "acp/skills") {
+        setSkills(m.payload.skills ?? []);
+        setCommands(m.payload.commands ?? []);
+      }
+    };
+    chrome.runtime.onMessage.addListener(onMsg);
+    chrome.runtime.sendMessage({ kind: "ACP_SEND", payload: { type: "acp/listSkills" } }).catch(() => {});
+    return () => chrome.runtime.onMessage.removeListener(onMsg);
+  }, []);
+
+  const match = /^\/([a-z0-9_-]*)$/i.exec(text.trim());
+  const query = match ? match[1]!.toLowerCase() : null;
+  const skillHits = query == null ? [] : skills.filter((s) => !query || s.name.toLowerCase().includes(query));
+  const commandHits = query == null ? [] : commands.filter((c) => !query || c.name.toLowerCase().includes(query));
+  const items = [
+    ...skillHits.map((s) => ({ kind: "skill" as const, ...s })),
+    ...commandHits.map((c) => ({ kind: "command" as const, ...c })),
+  ];
+
+  useEffect(() => setSel(0), [query, items.length]);
+
+  function pick(item: (typeof items)[number] | undefined) {
+    if (!item) return;
+    if (item.kind === "skill") {
+      const t = skillToRunText(item);
+      if (t) runText(t);
+    } else {
+      runText(`/${item.name}`);
+    }
+    aui.composer.setText("");
+  }
+
+  useEffect(() => {
+    if (query == null || items.length === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); setSel((i) => (i + 1) % items.length); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); e.stopPropagation(); setSel((i) => (i - 1 + items.length) % items.length); }
+      else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); pick(items[sel]); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); aui.composer.setText(""); }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, items, sel]);
+
+  if (query == null) return null;
+  return (
+    <div className="aui-slash-menu absolute inset-x-2 bottom-full z-50 mb-2 max-h-64 overflow-y-auto rounded-md border bg-card p-1 text-card-foreground shadow-md">
+      {skillHits.length > 0 && (
+        <div className="px-2 py-1 text-[10px] tracking-wide text-muted-foreground uppercase">Skills</div>
+      )}
+      {items.map((it, i) => (
+        <button
+          key={`${it.kind}-${it.name}`}
+          type="button"
+          onMouseEnter={() => setSel(i)}
+          onClick={() => pick(it)}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm",
+            i === sel && "bg-accent text-accent-foreground",
+          )}
+        >
+          {it.kind === "skill" ? (
+            <SparklesIcon className="size-3.5 shrink-0 opacity-70" />
+          ) : (
+            <span className="w-3.5 shrink-0 text-center text-xs opacity-60">/</span>
+          )}
+          <span className="truncate">{it.name}</span>
+          {it.description && (
+            <span className="ms-auto max-w-[45%] truncate text-[10px] text-muted-foreground">{it.description}</span>
+          )}
+        </button>
+      ))}
+      {items.length === 0 && (
+        <div className="px-2 py-2 text-xs text-muted-foreground">No skills or commands — record one to create a skill.</div>
+      )}
+    </div>
   );
 };
 

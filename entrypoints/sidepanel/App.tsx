@@ -3,7 +3,7 @@ import { AssistantRuntimeProvider, useLocalRuntime } from '@assistant-ui/react';
 import { DropdownMenu } from 'radix-ui';
 import {
   SettingsIcon, ArrowLeftIcon, SquarePenIcon, HistoryIcon, MoreHorizontalIcon,
-  Trash2Icon, PencilIcon, SparklesIcon,
+  Trash2Icon, PencilIcon, SparklesIcon, LoaderIcon,
 } from 'lucide-react';
 import { TooltipProvider } from '../../components/ui/tooltip';
 import { Thread } from '../../components/thread';
@@ -17,15 +17,79 @@ import { useSettings } from './settings-store';
 
 type View = 'chat' | 'settings' | 'history' | 'skills';
 
+interface SkillStep { do: string; why?: string; live?: boolean }
+interface SkillDraft {
+  id?: string;
+  name: string;
+  description?: string;
+  inputs?: string[];
+  steps: SkillStep[];
+  actions?: Array<Record<string, unknown>>;
+}
+type SkillFlow =
+  | { status: 'generating' }
+  | { status: 'draft'; draft: SkillDraft }
+  | { status: 'error'; error: string };
+
+/** Labels that name no specific element (so we fall back to a selector). */
+const BARE_LABEL = /^(div|span|a|button|input|select|textarea|summary|li|ul|ol|p|i|b|em|strong|svg|path|label|form|section|article|header|footer|nav|img|td|tr|table|h[1-6])$/i;
+
+/** Strip tracking / one-off query params so skills start from a stable URL. */
+const TRACKING_PARAM = /^(utm_|gclid$|gad_|gbraid$|wbraid$|fbclid$|spm$|spm_|from_|userCode$|user_code$|share_)/i;
+function cleanUrl(u: string): string {
+  try {
+    const url = new URL(u);
+    for (const k of [...url.searchParams.keys()]) if (TRACKING_PARAM.test(k)) url.searchParams.delete(k);
+    url.hash = '';
+    return url.toString();
+  } catch { return u; }
+}
+
+/** Compact a recording for the skill-authoring prompt (cut tokens). */
+function compactSteps(steps: RecordedStep[]) {
+  return steps.map((s, i) => {
+    if (s.type === 'note') return { n: i + 1, note: s.label };
+    if (s.type === 'navigate') return { n: i + 1, act: 'navigate', to: cleanUrl(s.url || s.label) };
+    const el = s.label?.trim();
+    const unhelpful = !el || BARE_LABEL.test(el);
+    return {
+      n: i + 1,
+      act: s.type,
+      el: unhelpful ? undefined : el,
+      value: s.value || undefined,
+      // Selector only when the label can't identify the element (token-saving).
+      sel: unhelpful && s.selector ? s.selector.slice(0, 90) : undefined,
+    };
+  });
+}
+
+/** Deterministic replay actions from a recording (no model needed to replay). */
+function buildActions(steps: RecordedStep[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const s of steps) {
+    if (s.type === 'navigate') out.push({ act: 'navigate', to: s.url || s.label });
+    else if (s.type === 'click') out.push({ act: 'click', sel: s.selector || undefined, el: s.label || undefined });
+    else if (s.type === 'input') out.push({ act: 'input', sel: s.selector || undefined, el: s.label || undefined, value: s.value });
+    else if (s.type === 'change') out.push({ act: 'change', sel: s.selector || undefined, el: s.label || undefined, value: s.value });
+  }
+  return out;
+}
+
 export default function App() {
   const [bridge, setBridge] = useState(false);
   const [view, setView] = useState<View>('chat');
   const [tab, setTab] = useState<{ title: string; url: string }>({ title: '', url: '' });
   const [recording, setRecording] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [stepCount, setStepCount] = useState(0);
+  const [noteText, setNoteText] = useState('');
   const [threadKey, setThreadKey] = useState(0);
   const [dictation, setDictation] = useState<{ listening: boolean; pending: boolean }>({ listening: false, pending: false });
+  const [skillFlow, setSkillFlow] = useState<SkillFlow | null>(null);
+  const wasRecording = useRef(false);
+  const lastSteps = useRef<RecordedStep[]>([]);
   const loadSettings = useSettings((s) => s.load);
+  const settings = useSettings((s) => s.settings);
 
   useEffect(() => {
     void loadSettings();
@@ -33,9 +97,30 @@ export default function App() {
       if (msg?.type === 'STATE') {
         setBridge(!!msg.bridgeConnected);
         setRecording(!!msg.isRecording);
+        setPaused(!!msg.paused);
         setStepCount((msg.steps ?? []).length);
+        const steps: RecordedStep[] = msg.steps ?? [];
+        // Recording just stopped → author a skill in the background (no chat dump).
+        if (wasRecording.current && !msg.isRecording && steps.length > 0) {
+          lastSteps.current = steps;
+          setView('chat');
+          setSkillFlow({ status: 'generating' });
+          const cur = useSettings.getState().settings;
+          acp({
+            type: 'acp/authorSkill',
+            actions: buildActions(steps),
+            notes: steps.filter((s) => s.type === 'note').map((s) => s.label),
+            agentId: cur.agentId, model: cur.model, effort: cur.effort,
+          });
+        }
+        wasRecording.current = !!msg.isRecording;
       } else if (msg?.type === 'ACTIVE_TAB') {
         setTab({ title: msg.title ?? '', url: msg.url ?? '' });
+      } else if (msg?.kind === 'ACP_UPDATE') {
+        const p = msg.payload;
+        if (p?.type === 'acp/skillDraft') { setView('chat'); setSkillFlow({ status: 'draft', draft: p.draft as SkillDraft }); }
+        else if (p?.type === 'acp/skillDraftError') setSkillFlow({ status: 'error', error: p.message });
+        else if (p?.type === 'acp/skillSaved') setSkillFlow(null);
       }
     };
     chrome.runtime.onMessage.addListener(onMsg);
@@ -46,7 +131,9 @@ export default function App() {
       if (!r) return;
       setBridge(!!r.bridgeConnected);
       setRecording(!!r.isRecording);
+      setPaused(!!r.paused);
       setStepCount((r.steps ?? []).length);
+      wasRecording.current = !!r.isRecording;
     });
     request({ type: 'GET_PAGE_CONTEXT' }).then((r: any) => { if (r) setTab({ title: r.title ?? '', url: r.url ?? '' }); });
     return () => {
@@ -54,6 +141,13 @@ export default function App() {
       window.removeEventListener('pilot:dictation', onDictation as EventListener);
     };
   }, [loadSettings]);
+
+  function sendNote() {
+    const t = noteText.trim();
+    if (!t) return;
+    setNoteText('');
+    chrome.runtime.sendMessage({ type: 'NOTE', text: t }).catch(() => {});
+  }
 
   function newChat() {
     resetSession();
@@ -144,27 +238,72 @@ export default function App() {
           <HistoryPage onContinue={continueChat} />
         ) : view === 'skills' ? (
           <SkillsPage />
+        ) : skillFlow ? (
+          <SkillDraftCard
+            flow={skillFlow}
+            onDiscard={() => setSkillFlow(null)}
+            onRetry={() => {
+              setSkillFlow(null);
+              chrome.runtime.sendMessage({ type: 'GET_STATE' }).then((r: any) => {
+                if (r?.steps?.length) {
+                  lastSteps.current = r.steps;
+                  setSkillFlow({ status: 'generating' });
+                  acp({
+                    type: 'acp/authorSkill',
+                    actions: buildActions(r.steps),
+                    notes: r.steps.filter((s: any) => s.type === 'note').map((s: any) => s.label),
+                    agentId: settings.agentId, model: settings.model, effort: settings.effort,
+                  });
+                }
+              }).catch(() => {});
+            }}
+            onSave={(skill) => acp({ type: 'acp/saveSkill', skill: {
+              id: skill.id, name: skill.name, description: skill.description, inputs: skill.inputs,
+              steps: skill.steps.map((s) => s.do),
+              actions: skill.actions,
+            } })}
+          />
         ) : (
           <>
             {recording ? (
               <>
                 <div className="flex shrink-0 items-center gap-2 border-b bg-red-50 px-3 py-1.5 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
-                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />
-                  <span>Recording · {stepCount} step{stepCount === 1 ? '' : 's'}</span>
+                  <span className={'inline-block h-2 w-2 rounded-full bg-red-500' + (paused ? '' : ' animate-pulse')} />
+                  <span>{paused ? 'Paused' : 'Recording'} · {stepCount} step{stepCount === 1 ? '' : 's'}</span>
                   <span className="truncate text-red-600/80 dark:text-red-300/80">
                     {dictation.listening ? '· 🎤 listening…' : dictation.pending ? '· 🎤 allow mic…' : '· 🎤 tap to narrate'}
                   </span>
-                  <div className="ms-auto flex items-center gap-1.5">
-                    <MicButton />
-                    <button
-                      onClick={() => chrome.runtime.sendMessage({ type: 'STOP' }).catch(() => {})}
-                      className="rounded-md bg-red-600 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-red-700"
-                    >
-                      ■ Stop
-                    </button>
-                  </div>
                 </div>
                 <RecordingSteps />
+                {/* Bottom control bar: note input · dictate · pause · stop */}
+                <div className="flex shrink-0 items-center gap-1.5 border-t px-2 py-2">
+                  <input
+                    value={noteText}
+                    onChange={(e) => setNoteText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') sendNote(); }}
+                    placeholder="Type a note…"
+                    className="h-8 min-w-0 flex-1 rounded-md border bg-card px-2 text-xs"
+                  />
+                  <button
+                    onClick={sendNote}
+                    className="shrink-0 cursor-pointer rounded-md border px-2 py-1 text-xs hover:bg-accent"
+                  >
+                    Note
+                  </button>
+                  <MicButton />
+                  <button
+                    onClick={() => chrome.runtime.sendMessage({ type: paused ? 'RESUME' : 'PAUSE' }).catch(() => {})}
+                    className="shrink-0 cursor-pointer rounded-md border px-2 py-1 text-xs hover:bg-accent"
+                  >
+                    {paused ? 'Resume' : 'Pause'}
+                  </button>
+                  <button
+                    onClick={() => chrome.runtime.sendMessage({ type: 'STOP' }).catch(() => {})}
+                    className="shrink-0 cursor-pointer rounded-md bg-red-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-red-700"
+                  >
+                    ■ Stop
+                  </button>
+                </div>
               </>
             ) : (
               <>
@@ -176,8 +315,6 @@ export default function App() {
                 <ConnectBanner />
               </>
             )}
-            {/* Keep Chat mounted (so its record→skill hand-off listener stays alive)
-                but hidden while recording, when the step list owns the panel. */}
             <div className={recording ? 'hidden' : 'flex min-h-0 flex-1 flex-col'}>
               <Chat key={threadKey} />
             </div>
@@ -189,13 +326,12 @@ export default function App() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Chat — owns the runtime (remounted on "New chat") and the record→skill hand-off
+// Chat — owns the runtime (remounted on "New chat")
 // ════════════════════════════════════════════════════════════════════════════
 function Chat() {
   const runtime = useLocalRuntime(acpAdapter);
   const runtimeRef = useRef(runtime);
   runtimeRef.current = runtime;
-  const wasRecording = useRef(false);
 
   function append(text: string) {
     try {
@@ -204,13 +340,6 @@ function Chat() {
   }
 
   useEffect(() => {
-    const onMsg = (msg: any) => {
-      if (msg?.type !== 'STATE') return;
-      const rec = !!msg.isRecording;
-      const steps: RecordedStep[] = msg.steps ?? [];
-      if (wasRecording.current && !rec && steps.length > 0) handOff(steps);
-      wasRecording.current = rec;
-    };
     // Fired by the composer "+" menu to run a skill / attach content in this thread.
     const onRun = (e: Event) => append((e as CustomEvent<string>).detail);
     const onRunParts = (e: Event) => {
@@ -218,29 +347,14 @@ function Chat() {
         (runtimeRef.current as any).thread.append({ role: 'user', content: (e as CustomEvent<any[]>).detail });
       } catch { /* runtime not ready */ }
     };
-    chrome.runtime.onMessage.addListener(onMsg);
     window.addEventListener('pilot:run', onRun as EventListener);
     window.addEventListener('pilot:runParts', onRunParts as EventListener);
-    request({ type: 'GET_STATE' }).then((r: any) => { if (r) wasRecording.current = !!r.isRecording; });
     return () => {
-      chrome.runtime.onMessage.removeListener(onMsg);
       window.removeEventListener('pilot:run', onRun as EventListener);
       window.removeEventListener('pilot:runParts', onRunParts as EventListener);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  function handOff(steps: RecordedStep[]) {
-    const clean = steps.map(({ screenshot, ...rest }) => rest);
-    append(
-      'I just recorded these actions on the page. Steps with type "note" are my spoken ' +
-      'narration — use them as context for what I was doing and why. Analyze the actions and ' +
-      'call the `save_skill` tool to save a reusable, parameterized skill (short name, one-line ' +
-      'description, any inputs that should be variables, and the ordered browser_* steps to ' +
-      'replay it). Then confirm what you saved.' +
-      '\n\n```json\n' + JSON.stringify(clean, null, 2) + '\n```',
-    );
-  }
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -541,6 +655,114 @@ function CopyButton({ text }: { text: string }) {
     >
       {copied ? 'Copied' : 'Copy'}
     </button>
+  );
+}
+
+/** Background skill authoring: generating → editable draft (confirm) → save. */
+function SkillDraftCard({ flow, onSave, onDiscard, onRetry }: {
+  flow: SkillFlow;
+  onSave: (skill: SkillDraft) => void;
+  onDiscard: () => void;
+  onRetry: () => void;
+}) {
+  if (flow.status === 'generating') {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
+        <LoaderIcon className="size-5 animate-spin text-muted-foreground" />
+        <p className="text-sm">Generating a skill from your recording…</p>
+        <p className="text-[11px] text-muted-foreground">Runs in the background — nothing is added to the chat.</p>
+      </div>
+    );
+  }
+  if (flow.status === 'error') {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+        <p className="text-sm text-destructive">{flow.error}</p>
+        <div className="flex gap-2">
+          <button onClick={onRetry} className="cursor-pointer rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90">Try again</button>
+          <button onClick={onDiscard} className="cursor-pointer rounded-md border px-3 py-1.5 text-sm hover:bg-accent">Discard</button>
+        </div>
+      </div>
+    );
+  }
+  return <SkillDraftEditor draft={flow.draft} onSave={onSave} onDiscard={onDiscard} />;
+}
+
+function SkillDraftEditor({ draft, onSave, onDiscard }: {
+  draft: SkillDraft;
+  onSave: (skill: SkillDraft) => void;
+  onDiscard: () => void;
+}) {
+  const [name, setName] = useState(draft.name);
+  const [description, setDescription] = useState(draft.description ?? '');
+  const [inputs, setInputs] = useState<string[]>(draft.inputs ?? []);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+      <h2 className="mb-1 text-sm font-semibold">Save this skill?</h2>
+      <p className="mb-4 text-[11px] text-muted-foreground">Generated from your recording. Edit anything before saving.</p>
+
+      <label className="mb-1 block text-[11px] text-muted-foreground">Name</label>
+      <input value={name} onChange={(e) => setName(e.target.value)} className="mb-3 h-9 w-full rounded-md border bg-card px-2 text-sm" />
+
+      <label className="mb-1 block text-[11px] text-muted-foreground">Description</label>
+      <textarea
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        rows={2}
+        className="mb-3 w-full resize-none rounded-md border bg-card px-2 py-1 text-sm"
+      />
+
+      <label className="mb-1 block text-[11px] text-muted-foreground">Inputs (variables)</label>
+      <div className="mb-3 flex flex-wrap items-center gap-1">
+        {inputs.length === 0 && <span className="text-[11px] text-muted-foreground">none</span>}
+        {inputs.map((v, i) => (
+          <span key={`${v}-${i}`} className="flex items-center gap-1 rounded border bg-card px-1.5 py-0.5 text-[11px]">
+            {v}
+            <button
+              onClick={() => setInputs(inputs.filter((_, j) => j !== i))}
+              aria-label={`Remove ${v}`}
+              className="cursor-pointer text-muted-foreground hover:text-destructive"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+
+      <label className="mb-1 block text-[11px] text-muted-foreground">Steps</label>
+      <ol className="mb-4 space-y-1.5 text-xs">
+        {draft.steps.map((st, i) => (
+          <li key={i} className="flex gap-2">
+            <span className="text-muted-foreground tabular-nums">{i + 1}.</span>
+            <span className="min-w-0 flex-1">
+              <span className="block break-words">{st.do}</span>
+              {st.why && <span className="mt-0.5 block text-[11px] text-muted-foreground italic">{st.why}</span>}
+            </span>
+            {st.live && (
+              <span
+                title="Depends on live page state — the agent re-checks it at replay"
+                className="h-fit shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+              >
+                LIVE
+              </span>
+            )}
+          </li>
+        ))}
+      </ol>
+
+      <div className="mt-auto flex items-center gap-2 py-2">
+        <button
+          onClick={() => onSave({ name: name.trim() || draft.name, description: description.trim(), inputs, steps: draft.steps, actions: draft.actions })}
+          className="cursor-pointer rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
+        >
+          Save skill
+        </button>
+        <button onClick={onDiscard} className="cursor-pointer rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
+          Discard
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -51,6 +51,18 @@ export default defineContentScript({
       const name = e.getAttribute('name');
       if (name) return name;
 
+      // Fallbacks so we rarely end up with a meaningless tag like "div".
+      const testid = e.getAttribute('data-testid') || e.getAttribute('data-test');
+      if (testid?.trim()) return testid.trim();
+      if (id) return `#${id}`;
+      const role = e.getAttribute('role');
+      const cls = typeof e.className === 'string'
+        ? e.className.trim().split(/\s+/).filter(Boolean)[0]
+        : '';
+      if (role && cls) return `${role} .${cls}`;
+      if (role) return role;
+      if (cls) return `.${cls}`;
+
       return e.tagName.toLowerCase();
     }
 

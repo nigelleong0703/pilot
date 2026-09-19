@@ -1,7 +1,7 @@
 {
-  "name": "my-recorder",
+  "name": "pilot",
   "version": "1.0.0",
-  "description": "A Chrome extension that records user actions on a page (clicks, typing, selects, submits) as semantic steps, shown live in a Side Panel.",
+  "description": "Pilot — a local browser agent: chat with an AI that drives the page, record actions (with voice) into reusable skills, and share the browser tools with other agents.",
   "private": true,
   "type": "module",
   "scripts": {

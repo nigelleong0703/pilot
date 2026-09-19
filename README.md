@@ -1,279 +1,234 @@
-# Browser Extension
+<p align="center">
+  <img src="assets/logo.svg" width="104" height="104" alt="Pilot logo" />
+</p>
 
-A Chrome/Edge MV3 extension that lets your local AI (Claude) drive the browser directly, and records your actions as reusable skill steps.
+<h1 align="center">Pilot</h1>
+
+<p align="center">
+  A local <b>browser agent</b> for Chrome/Edge — chat with an AI that drives the page you're on,
+  record your actions (with voice) into reusable <b>skills</b>, and share the same browser tools
+  with other agents (Claude Code, Codex, OpenCode…).
+</p>
+
+<p align="center">
+  <a href="https://github.com/nigelleong0703/pilot/releases"><img alt="release" src="https://img.shields.io/github/v/release/nigelleong0703/pilot?display_name=tag&sort=semver"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A518-brightgreen">
+  <img alt="chrome" src="https://img.shields.io/badge/Chrome%2FEdge-109%2B-blue">
+  <a href="https://github.com/nigelleong0703/pilot/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/nigelleong0703/pilot?style=social"></a>
+</p>
+
+<p align="center"><img src="assets/screenshot.png" alt="Pilot side panel" width="720" /></p>
 
 ---
 
-## How it works
+## Install
 
-```
-Claude (AI) ──stdio──► MCP server ──ws:9235──► Bridge daemon ──ws:9234──► Extension ──► Page
+**1. The extension** — pick one:
+
+- **Chrome Web Store** *(coming soon)* — search **Pilot** and click *Add to Chrome*.
+- **From a release (no build):** download `pilot-<version>-chrome.zip` from the
+  [latest release](https://github.com/nigelleong0703/pilot/releases/latest), unzip it, then in
+  `chrome://extensions` turn on **Developer mode → Load unpacked** and pick the unzipped folder.
+- **From source:**
+  ```bash
+  git clone https://github.com/nigelleong0703/pilot.git && cd pilot
+  npm install && npm run build     # -> .output/chrome-mv3 (load this folder)
+  ```
+
+**2. The agent bridge + MCP server** (what actually controls the page):
+
+```bash
+cd mcp-server && npm install && npm run build
+# or, once published:  npx pilot-mcp
 ```
 
-- **Extension** — loads in Edge/Chrome, holds the WebSocket to the daemon, injects content scripts, captures screenshots
-- **Bridge daemon** — one long-lived Node.js process that brokers between the extension and any number of Claude sessions
-- **MCP server** — thin stdio process Claude launches per session; auto-spawns the daemon if it isn't running
+**3. Connect your agent** — open the side panel and click **Connect Codex / OpenCode** (one click),
+or register manually:
+
+```bash
+codex    mcp add pilot -- node "<repo>/mcp-server/dist/index.js"
+claude   mcp add pilot --scope user -- node "<repo>/mcp-server/dist/index.js"
+opencode mcp add pilot -- node "<repo>/mcp-server/dist/index.js"
+```
+
+No browser needs to be open — Pilot launches one on first use.
 
 ---
 
-## Prerequisites
+```
+Claude Code / Codex / OpenCode ──stdio──► MCP server ──ws:9235──► Bridge daemon ──ws:9234──► Extension ──► Page
+        (or the Pilot side panel) ──────────acp/*──────────────────┘
+```
 
-| Requirement | Version |
+Three parts:
+
+| Part | What it is |
 |---|---|
-| Node.js | 18 or later |
-| Edge or Chrome | 109 or later |
-| Claude Code CLI | any recent version |
+| **Extension** (`entrypoints/`, `.output/chrome-mv3`) | MV3 extension. Side panel chat, page control, recorder, on-page visuals. |
+| **Bridge daemon** (`mcp-server/dist/bridge-daemon.js`) | One long-lived process. Brokers the extension to any number of agents; runs the ACP chat agent; stores skills/transcripts. |
+| **MCP server** (`mcp-server/dist/index.js`) | Thin stdio process an agent launches per session. Auto-spawns the daemon; exposes the `browser_*` tools. |
+
+Ports: **9234** daemon↔extension, **9235** daemon↔MCP clients.
 
 ---
 
-## 1. Install the browser extension
+## Features
 
-1. Open **`edge://extensions`** (or `chrome://extensions`)
-2. Enable **Developer mode** (toggle, top-right)
-3. Click **Load unpacked**
-4. Select this folder:
-   ```
-   browser-extension\.output\chrome-mv3
-   ```
-5. The extension card should appear as **"Browser Extension"**
-
-> After any rebuild, click **Reload** on the extension card to pick up changes.
-
----
-
-## 2. Set up the MCP server
-
-```bash
-cd mcp-server
-npm install
-npm run build
-```
-
-This compiles `src/index.ts` and `src/bridge-daemon.ts` into `dist/`.
+- **Chat in the side panel** — an [ACP](https://agentclientprotocol.com) front end. The agent
+  drives your current tab and shows reasoning + tool calls as one collapsible
+  "thinking" block.
+- **Agent picker + bring-your-own-model** — Claude Code, Gemini, Codex, Pi, OpenCode,
+  Qwen, Kimi, Grok, or any custom ACP command; optional provider/model/API key.
+- **Page perception** — CDP by default (native accessibility tree) with automatic
+  DOM fallback; optional viewport screenshots.
+- **On-page visuals** — a cursor glides to the element, a glow halo marks it, and the
+  whole page gets a "Pilot is controlling this tab" glow frame.
+- **Recorder → skill** — record clicks/typing/navigation (each with a cropped
+  screenshot), dictate narration (**voice → text**), then Pilot authors a skill and
+  exports it to every agent installed on the machine.
+- **Deterministic replay** — a saved skill runs in **one call** (`browser_run_skill`),
+  no model in the loop.
+- **Auto-launch** — if an agent asks for a page action and no browser is connected,
+  Pilot starts a browser with the extension for you.
+- **History** — past chats with transcript + Continue (resumes with the session's own agent).
 
 ---
 
-## 3. Register with Claude CLI
+## Requirements
 
-Run this once — it adds the server to your user-level config so every project can use it:
-
-```bash
-claude mcp add browser-extension --scope user -- node "FULL_PATH\browser-extension\mcp-server\dist\index.js"
-```
-
-Replace `FULL_PATH` with the actual absolute path. Example for this install:
-
-```bash
-claude mcp add browser-extension --scope user -- node "C:\Users\5207000046\OneDrive - Sony\Desktop\local agent\browser-extension\mcp-server\dist\index.js"
-```
-
-Verify:
-
-```bash
-claude mcp list
-# browser-extension: ... ✓ Connected
-```
+- Node.js 18+
+- Chrome or Edge 109+
+- At least one agent CLI on `PATH` (e.g. `codex`, `opencode`) — or the bundled
+  Claude adapter with a Claude Code login.
 
 ---
 
-## 4. (Optional) Name your session
+## Using Pilot
 
-Each Claude session gets its own browser tab group labeled `s-xxxxxx` by default. To give it a meaningful name, add `MCP_SESSION_LABEL` to the server registration in `~/.claude.json`:
+### Chat (side panel)
+Open the side panel and type. The agent drives your current tab through the
+`browser_*` tools. Switch agent/model/effort and add an API key in **Settings**.
 
-```json
-"browser-extension": {
-  "command": "node",
-  "args": ["C:\\...\\mcp-server\\dist\\index.js"],
-  "env": {
-    "MCP_SESSION_LABEL": "work"
-  }
-}
-```
+### Recorder
+Click the ● in the composer (or dictate with 🎤, which starts recording too). The
+panel switches to a full-screen step list; each step shows a **cropped screenshot of
+where you acted**. The bottom bar has:
 
-The tab group in Edge will then show **Browser Extension · work**.
+- **Type a note… / Note** — add a text step instead of speaking
+- **🎤** — dictate (voice → text; the first use opens a permission page)
+- **Pause / Resume** — stop capturing while you do something off-script
+- **■ Stop**
 
----
-
-## 5. (Optional) Auto-start the daemon on login
-
-```powershell
-cd mcp-server
-powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1
-```
-
-Registers a Windows Task Scheduler entry (no admin required) so the daemon is ready before you open Claude.
+On **Stop**, Pilot authors the skill in the background and shows a **"Save this
+skill?"** card (editable name / description / inputs). Saved skills are exported to
+Claude Code (`~/.claude/skills`), Codex (`~/.codex/skills`) and Pi (`~/.pi/skills`),
+and can be run from the composer **+** menu.
 
 ---
 
-## MCP tools reference
+## MCP tools
 
-### Browser control
+Browser control:
 
 | Tool | Description |
 |---|---|
-| `browser_navigate` | Navigate to a URL |
-| `browser_snapshot` | List all interactive elements with numbered refs |
-| `browser_click` | Click an element by ref or CSS selector |
-| `browser_type` | Type text into an input by ref or CSS selector |
-| `browser_get_text` | Get the full visible text of the page |
-| `browser_screenshot` | Capture a JPEG screenshot of the viewport |
+| `browser_list_tabs` | List the tabs in the Pilot group |
+| `browser_navigate` | Open a URL in the active (or given) tab |
+| `browser_snapshot` | Interactive elements with numbered `ref`s |
+| `browser_click` | Click by `ref` or CSS selector |
+| `browser_type` | Type into an input (`submit` to press Enter) |
+| `browser_select_option` | Choose an option in a `<select>` |
+| `browser_get_text` | Visible text of the page |
+| `browser_screenshot` | JPEG screenshot of the viewport |
 
-**Typical flow:**
-```
-browser_navigate → browser_snapshot → browser_click / browser_type → browser_screenshot
-```
-
-### Recorder control
+Skills:
 
 | Tool | Description |
 |---|---|
-| `recorder_start` | Begin recording user actions (clears any previous recording) |
-| `recorder_stop` | Stop recording |
-| `recorder_get_steps` | Return recorded steps as JSON (use to build skills) |
+| `save_skill` | Persist a skill and auto-export it to every installed agent |
+| `list_skills` | List saved skills (`deterministic: true` when it has replay actions) |
+| `browser_run_skill` | **Replay a saved skill in one call** (optional `inputs` fill `{{placeholders}}`) |
+
+Recorder: `recorder_start`, `recorder_stop`, `recorder_get_steps`.
+
+Typical loop: `browser_snapshot` → `browser_click` / `browser_type` → repeat, or
+`browser_run_skill` for a saved flow.
 
 ---
 
-## Side panel UI
+## Packaging & publishing
 
-Click the **Browser Extension** toolbar icon to open the side panel.
-
-| Indicator | Meaning |
-|---|---|
-| ⦿ **MCP connected** (green) | Daemon running, extension connected |
-| ⦿ **offline** (grey) | Daemon not running or extension not loaded |
-| **idle** | Not recording |
-| **recording** (red dot) | Recording is active |
-
-Buttons: **Start** · **Stop** · **Clear** · **Export JSON**
-
----
-
-## Architecture
-
-### Ports
-
-| Port | Purpose |
-|---|---|
-| 9234 | Daemon ↔ Extension WebSocket |
-| 9235 | Daemon ↔ MCP servers WebSocket |
-
-### Multi-session isolation
-
-Each Claude session gets a fresh browser tab in its own colored **tab group** in the tab strip (`Browser Extension · <label>`). Multiple Claude windows never share a tab.
-
-### Connection stability
-
-- Background service worker holds the WebSocket to the daemon
-- Offscreen document (`offscreen.html`) keeps the extension process alive
-- `chrome.alarms` fires every 30 s as a secondary keepalive
-- Auto-reconnects every 3 s on disconnect
-- First MCP session auto-spawns the daemon if it's not running
-
----
-
-## Agent Chat (ACP) — chat in the side panel, drive the page
-
-The side panel now has a **Chat** tab. It is an [ACP](https://agentclientprotocol.com)
-front end: you chat with Claude directly in the browser, and the agent drives the
-current tab through the same `browser_*` tools. The daemon runs the agent as a
-subprocess and hands it the browser MCP.
-
-```
-side panel (Chat) --acp/*--> daemon --stdio--> claude-code-acp --> Claude
-                               |                      |
-                               |                      +--MCP--> index.js --> extension --> page
-                               +--commands--> extension --> page
-```
-
-### Prerequisites
-
-Nothing extra to install — the ACP agent (`@zed-industries/claude-code-acp`) is a
-**bundled dependency** of `mcp-server`, so a normal `npm install` in that folder
-pulls it in. The daemon runs it via `node` (no global install, no PATH entry).
-
-- **Auth:** it uses your **existing Claude Code login** — if you already use Claude
-  Code you're set, no separate `claude /login` needed. (Only the isolated-config-dir
-  option below needs its own one-time login.)
-- **Git Bash** must be installed (the agent requires it on Windows). The daemon
-  auto-detects `bash.exe`; override with `CLAUDE_CODE_GIT_BASH_PATH` if needed.
-- The daemon must **not** run inside another Claude Code session (it unsets
-  `CLAUDECODE` for the agent automatically; just don't launch it from `claude`).
-- To use a different ACP agent instead of the bundled one, set `ACP_AGENT_CMD`.
-
-### Using it
-
-1. Rebuild and reload (see below), open the side panel, pick the **Chat** tab.
-2. Type a message — the first one starts a session. The agent can navigate,
-   snapshot, click, type, and screenshot the active tab.
-3. Tool calls that need approval show an **Allow / Reject** prompt.
-4. Conversations are saved per session under `~/.browser-extension-agent/sessions/`
-   and are listed in the **History…** dropdown.
-
-### Recorder → skill
-
-On the **Recorder** tab, record some actions, then press **Make skill**. The steps
-are handed to the chat agent, which authors a reusable, parameterized skill.
-
-### Tool isolation (optional but recommended)
-
-`claude-code-acp` inherits your *global* Claude Code MCP servers (e.g. playwright,
-terminator), so the agent may reach for those instead of this extension's browser
-tools. To give it **only** the extension's browser MCP, point it at a dedicated
-config dir and log in there once:
+**Extension (Chrome Web Store).**
 
 ```bash
-# one-time: create + authenticate an isolated config dir
-set CLAUDE_CONFIG_DIR=%USERPROFILE%\.browser-extension-agent\claude-cfg
-claude /login
-
-# then run the daemon with:
-set ACP_CLAUDE_CONFIG_DIR=%USERPROFILE%\.browser-extension-agent\claude-cfg
+npm run zip            # Chrome -> .output/*-chrome.zip
+npm run build:firefox && npm run zip -b firefox   # Firefox (MV3)
 ```
 
-Without this, chat still works — the agent just has your other MCP tools available too.
+Upload the Chrome zip in the [Chrome Web Store developer dashboard](https://chrome.google.com/webstore/devconsole).
+Expect reviewers to ask about two permissions:
 
-### Environment knobs
+- `debugger` — required for CDP page control (same model Claude in Chrome uses).
+- `<all_urls>` — required to act on whatever page you're viewing.
+
+If you don't want CDP, users can switch to **DOM** mode in Settings, but the
+`debugger` permission still must be declared.
+
+**MCP server (npm).**
+
+```bash
+cd mcp-server
+npm pack                # dry-run: inspect the tarball
+npm publish             # publishes the `bin` in package.json
+```
+
+> When the server is installed outside this repo, the daemon can't infer the
+> extension path. Either keep the extension loaded in the browser, or set
+> `PILOT_EXTENSION_PATH=/path/to/.output/chrome-mv3` so auto-launch can load it.
+
+---
+
+## Configuration (environment)
 
 | Var | Purpose |
 |---|---|
-| `ACP_AGENT_CMD` | Agent binary (default `claude-code-acp[.cmd]`) — swap for another ACP agent |
-| `ACP_CLAUDE_CONFIG_DIR` | Isolated config dir so only the browser MCP loads |
-| `CLAUDE_CODE_GIT_BASH_PATH` | Explicit path to `bash.exe` if auto-detect fails |
+| `MCP_BRIDGE_PORT` / `MCP_BRIDGE_CLIENT_PORT` | Override 9234 / 9235 |
+| `PILOT_EXTENSION_PATH` | Extension folder for auto-launch |
+| `PILOT_BROWSER_BIN` | Browser executable to launch (auto-detected otherwise) |
+| `PILOT_BROWSER_HEADLESS=1` | Launch the auto-started browser headless |
+| `PILOT_NO_AUTOLAUNCH=1` | Disable auto-launch entirely |
+| `ACP_AGENT_CMD`, `ACP_<AGENT>_CMD` | Override the agent binary |
+| `ACP_<AGENT>_ARGS` | Override agent args |
 
 ---
 
 ## Troubleshooting
 
-**Side panel shows "offline"**
-1. Confirm the extension is enabled in `edge://extensions`
-2. Open any web page (wakes the service worker)
-3. Wait ~5 s for auto-reconnect, or click Reload on the extension card
-
-**"Bridge not ready yet" in Claude**
-The daemon is still starting. Retry after 2–3 s. To start it manually:
-```bash
-node "mcp-server\dist\bridge-daemon.js"
-```
-
-**Snapshot / click fails with "Receiving end does not exist"**
-The page navigated and tore down the content script. The extension auto-reinjects it — retry the tool call once.
-
-**Extension won't load on Sony-managed Edge**
-Developer mode may be blocked by policy. Ask IT to set:
-```
-HKLM\SOFTWARE\Policies\Microsoft\Edge\DeveloperToolsAvailability = 1
-```
+- **"Bridge not ready yet" / side panel offline** — the daemon is starting or the
+  extension isn't loaded. Reload the extension; wait a few seconds.
+- **`browser_*` fails with "extension not connected"** — open a normal web page, or
+  let Pilot auto-launch a browser (set `PILOT_BROWSER_BIN` if detection fails).
+- **Voice not working** — the first 🎤 click opens a permission page; allow the mic
+  there (Chrome suppresses the prompt inside the side panel).
+- **Mic keyframes / CSP** — the on-page visuals use only DOM + Web Animations, so they
+  work under strict CSP / Trusted Types.
+- **Codex/OpenCode can't run a skill** — the `browser_*` tools only exist where the
+  Pilot MCP is registered (see *Connect an agent*). Skills exported to those agents
+  need that registration.
 
 ---
 
-## Rebuilding after code changes
+## Development
 
 ```bash
-# In browser-extension/ root — rebuilds the extension
-npm run build
+npm run dev            # WXT dev server (hot reload)
+npm run compile        # tsc --noEmit
+npm run build          # production build
 
-# In mcp-server/ — rebuilds the Node.js server
-npm run build
-
-# Then reload the extension in edge://extensions
+cd mcp-server && npm run build
+node dist/bridge-daemon.js   # run the daemon manually (logs: ~/.pilot/daemon.log)
 ```
+
+Data: skills in `~/.pilot/skills`, transcripts in `~/.browser-extension-agent/sessions`,
+daemon log in `~/.pilot/daemon.log`.

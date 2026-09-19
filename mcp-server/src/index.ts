@@ -145,11 +145,64 @@ server.registerTool(
       description: z.string().optional().describe('One-line description'),
       inputs: z.array(z.string()).optional().describe('Names of values that should be variables'),
       steps: z.array(z.string()).describe('Ordered steps to replay, referencing browser_* tools'),
+      actions: z.array(z.any()).optional().describe('Deterministic replay actions (from a recording) — enables browser_run_skill'),
     },
   },
-  async ({ name, description, inputs, steps }) => {
-    const { skill, exportedTo } = skills.save({ name, description: description ?? '', inputs: inputs ?? [], steps });
+  async ({ name, description, inputs, steps, actions }) => {
+    const { skill, exportedTo } = skills.save({ name, description: description ?? '', inputs: inputs ?? [], steps, actions });
     return asText({ saved: true, id: skill.id, name: skill.name, exportedTo });
+  },
+);
+
+server.registerTool(
+  'browser_run_skill',
+  {
+    title: 'Run a saved skill',
+    description:
+      'Replay a saved skill DETERMINISTICALLY in one call (no step-by-step browser_* tool calls). ' +
+      'Looks the skill up by name and runs its recorded actions; optional `inputs` substitute ' +
+      '{{name}} placeholders in those actions.',
+    inputSchema: {
+      name: z.string().describe('Skill name (or id) from list_skills'),
+      inputs: z.record(z.any()).optional().describe('Values for the skill inputs, e.g. { url: "..." }'),
+      from: z.number().int().optional().describe('Action index to resume from (after handling a LIVE step)'),
+    },
+  },
+  async ({ name, inputs, from }) => {
+    const skill = skills.list().find((s) => s.name === name || s.id === name);
+    if (!skill) throw new Error(`No skill named "${name}". Use list_skills.`);
+    const actions = (skill.actions ?? []) as Array<Record<string, unknown>>;
+    if (!actions.length) {
+      throw new Error(`Skill "${name}" has no deterministic actions — replay it with the browser_* tools instead.`);
+    }
+    const values = (inputs ?? {}) as Record<string, unknown>;
+    const subst = (v: unknown): unknown =>
+      typeof v === 'string'
+        ? v.replace(/\{\{\s*([a-z0-9_ -]+)\s*\}\}/gi, (_, k: string) => String(values[k.trim()] ?? `{{${k}}}`))
+        : v;
+    const resolved = actions.map((a) =>
+      Object.fromEntries(Object.entries(a).map(([k, v]) => [k, subst(v)])),
+    );
+
+    // Steps flagged `live` depend on runtime state: run the fixed prefix, then
+    // hand the live step back to the model instead of replaying it blindly.
+    const start = Math.max(0, from ?? 0);
+    let liveIdx = -1;
+    for (let i = start; i < resolved.length; i++) if ((resolved[i] as any).live) { liveIdx = i; break; }
+    const end = liveIdx === -1 ? resolved.length : liveIdx;
+    const slice = resolved.slice(start, end);
+    const ran = slice.length ? await call('replay', { actions: slice }, 180_000) : { results: [] };
+
+    if (liveIdx !== -1) {
+      const step = resolved[liveIdx] as any;
+      return asText({
+        ran,
+        pausedAt: liveIdx,
+        liveStep: { do: step.do ?? `${step.act} ${step.el ?? step.sel ?? ''}`, why: step.why },
+        next: `This step depends on live page state. Do it now with browser_snapshot + browser_* (e.g. ${step.act} "${step.el ?? ''}"), then call browser_run_skill again with from=${liveIdx + 1}.`,
+      });
+    }
+    return asText(ran);
   },
 );
 
@@ -161,7 +214,58 @@ server.registerTool(
     inputSchema: {},
   },
   async () =>
-    asText({ skills: skills.list().map((s) => ({ id: s.id, name: s.name, description: s.description, inputs: s.inputs })) }),
+    asText({ skills: skills.list().map((s) => ({ id: s.id, name: s.name, description: s.description, inputs: s.inputs, version: s.version, deterministic: !!(s.actions && s.actions.length) })) }),
+);
+
+server.registerTool(
+  'get_skill',
+  {
+    title: 'Get a skill',
+    description:
+      'Read a saved skill in full: steps, inputs, version/changelog, and its deterministic ' +
+      'actions (each with `why` intent and `live` flag). Use this before following or updating it.',
+    inputSchema: { name: z.string().describe('Skill name (or id)') },
+  },
+  async ({ name }) => {
+    const s = skills.find(name);
+    if (!s) throw new Error(`No skill named "${name}". Use list_skills.`);
+    return asText(s);
+  },
+);
+
+server.registerTool(
+  'update_skill',
+  {
+    title: 'Update a skill (global)',
+    description:
+      'Refine a saved skill and re-export it to EVERY installed agent (Claude Code, Codex, pi). ' +
+      'Use this when a skill failed or needs a tweak: pass the changed fields plus a short `note`. ' +
+      'Bumps the version (old revisions are archived). Pass `steps` (and optional `actions` with ' +
+      'why/live) to replace the flow. Only update when needed — once it works reliably, leave it.',
+    inputSchema: {
+      name: z.string().describe('Skill name (or id)'),
+      description: z.string().optional(),
+      inputs: z.array(z.string()).optional(),
+      steps: z.array(z.string()).optional().describe('Replacement step list'),
+      actions: z.array(z.any()).optional().describe('Replacement deterministic actions (act/sel/el/value/why/live)'),
+      note: z.string().optional().describe('Why it changed (recorded in the changelog)'),
+    },
+  },
+  async ({ name, description, inputs, steps, actions, note }) => {
+    const s = skills.find(name);
+    if (!s) throw new Error(`No skill named "${name}". Use list_skills.`);
+    const { skill, exportedTo } = skills.save({
+      id: s.id,
+      name: s.name,
+      description: description ?? s.description,
+      inputs: inputs ?? s.inputs,
+      steps: steps ?? s.steps,
+      actions: actions ?? s.actions,
+      note: note ?? 'updated',
+      source: process.env.MCP_SESSION_LABEL || 'mcp',
+    });
+    return asText({ updated: true, id: skill.id, name: skill.name, version: skill.version, exportedTo });
+  },
 );
 
 server.registerTool(

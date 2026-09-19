@@ -196,7 +196,14 @@ const PILOT_SYSTEM_PROMPT =
   'separate or headless browser, and do not browse the web with any other tool. These browser_* ' +
   'tools are your ONLY tools; do not search for other tools. Typical flow: browser_snapshot -> ' +
   'browser_click/browser_type; browser_get_text to read the page. You can also record the user\'s ' +
-  'actions and author skills via the recorder_* tools.';
+  'actions and author skills via the recorder_* tools. ' +
+  'When you replay a saved skill with browser_run_skill, check the per-step results: if a step ' +
+  'fails, do NOT stop — take a browser_snapshot, finish the task with the browser_* tools, and ' +
+  'tell the user which step failed so the skill can be fixed. ' +
+  'Skills are shared GLOBALLY across every harness. When a skill fails or needs a tweak, call ' +
+  'get_skill to read it, then update_skill with the improved fields and a short `note` — that ' +
+  'updates it everywhere (all harnesses) and bumps the version. Only refine when necessary: ' +
+  'once a skill works reliably, leave it alone.';
 
 interface AgentDef { spawn: () => AgentSpawn; meta: () => unknown; mcp: boolean; }
 const AGENTS: Record<string, AgentDef> = {
@@ -441,6 +448,8 @@ class ChatManager {
   private live = new Set<string>();
   /** accumulates streamed assistant text per session, flushed on turn end. */
   private buf = new Map<string, string>();
+  /** One-shot text collectors for helper sessions (e.g. skill authoring). */
+  private collectors = new Map<string, { text: string }>();
 
   /** The browser MCP handed to every agent session so it can drive the page. */
   private browserMcp(): McpServerSpec {
@@ -505,8 +514,15 @@ class ChatManager {
     // Relay raw update to the side panel for live rendering.
     pushToExtension({ type: 'acp/update', sessionId, update });
 
-    // Accumulate assistant text; persist tool calls as they happen.
     const kind = update.sessionUpdate;
+    // Helper sessions (e.g. skill authoring) collect their own text instead.
+    const collector = this.collectors.get(sessionId);
+    if (collector) {
+      if (kind === 'agent_message_chunk') collector.text += update.content?.text ?? '';
+      return;
+    }
+
+    // Accumulate assistant text; persist tool calls as they happen.
     if (kind === 'agent_message_chunk') {
       const text = update.content?.text ?? '';
       this.buf.set(sessionId, (this.buf.get(sessionId) ?? '') + text);
@@ -639,6 +655,85 @@ class ChatManager {
     await this.prompt(sessionId, prompt);
   }
 
+  /**
+   * Author a skill from a recording in the BACKGROUND: a dedicated helper session
+   * returns strict JSON, surfaced as a draft the user confirms. Keeps the chat
+   * thread clean, and only the compact step summary is sent (fewer tokens).
+   */
+  async authorSkill(actions: Array<Record<string, unknown>>, notes: string[], agentIdHint?: string, modelHint?: string, effortHint?: 'low' | 'medium' | 'high'): Promise<void> {
+    try {
+      const id = agentIdHint ?? this.agentId;
+      const def = agentDef(id);
+      const effort = effortHint ?? 'medium';
+      const key = `${id}:effort-${effort}`;
+      const client = await this.ensureClient(key, id, def);
+      const sid = await client.newSession(process.cwd(), [], {
+        systemPrompt: 'You only output strict JSON. No prose, no markdown fences.',
+      });
+      const entry = { text: '' };
+      this.collectors.set(sid, entry);
+      const indexed = actions.map((a, i) => ({ i, ...a }));
+      const prompt =
+        'Convert this recorded browser session into ONE reusable skill.\n' +
+        'You are given the ACTIONS (indexed) and the user\'s spoken NOTES.\n' +
+        'Return ONLY this JSON object (no prose, no markdown):\n' +
+        '{"name":"kebab-case","description":"one line","inputs":["..."],' +
+        '"steps":[{"i":<action index>,"do":"browser_* instruction","why":"one short sentence of intent","live":false}]}\n\n' +
+        'Rules for each step:\n' +
+        '- "do" uses ONLY: browser_navigate, browser_snapshot, browser_click, browser_type, browser_select_option, browser_get_text. Prefer acting by visible label, e.g. browser_click on "控制台".\n' +
+        '- "why" = the intent of that step (so a future agent understands it).\n' +
+        '- "live": true when the step depends on RUNTIME state and the exact target/value may differ each run (e.g. a server row whose name changes, a dynamic modal, a value to read). false for fixed steps (a plain navigation, a stable menu button).\n' +
+        '- Include exactly one entry per action index, in order.\n' +
+        '- Start from a STABLE entry point (drop tracking/one-off query params).\n' +
+        '- Parameterize account-specific ids as inputs ONLY when the notes say they vary; do not invent inputs.\n\n' +
+        'Example: {"name":"open-aliyun-swas-ssh","description":"Open an SSH web console for an Aliyun lightweight server",' +
+        '"inputs":["server_name"],"steps":[{"i":0,"do":"browser_navigate to https://swasnext.console.aliyun.com/servers","why":"open the server list","live":false},' +
+        '{"i":1,"do":"browser_snapshot","why":"find the server row","live":false},' +
+        '{"i":2,"do":"browser_click on \\"{server_name}\\"","why":"select the target server (name varies)","live":true}]}\n\n' +
+        'Actions:\n' + JSON.stringify(indexed) +
+        (notes.length ? '\n\nSpoken notes:\n' + JSON.stringify(notes) : '') +
+        '\n\nReply with the JSON only.';
+      try { await client.prompt(sid, prompt); } catch { /* fall through */ }
+      this.collectors.delete(sid);
+      const ann = extractJson(entry.text);
+      if (ann && ann.name && Array.isArray(ann.steps)) {
+        const byIndex = new Map<number, { do?: string; why?: string; live?: boolean }>();
+        for (const s of ann.steps) if (typeof s?.i === 'number') byIndex.set(s.i, s);
+        // Annotate the recorded actions (aligned by index) for replay/fallback.
+        const annotated = actions.map((a, i) => {
+          const m = byIndex.get(i);
+          return { ...a, ...(m?.why ? { why: m.why } : {}), ...(m?.live ? { live: true } : {}) };
+        });
+        const steps = actions.map((a, i) => byIndex.get(i)?.do ?? String(a.act ?? ''));
+        const draft = {
+          name: ann.name,
+          description: ann.description ?? '',
+          inputs: ann.inputs ?? [],
+          // steps carry intent + live flag for the confirmation card & export
+          steps: actions.map((a, i) => ({
+            do: byIndex.get(i)?.do ?? String(a.act ?? ''),
+            why: byIndex.get(i)?.why,
+            live: !!byIndex.get(i)?.live,
+          })),
+          actions: annotated,
+        };
+        void steps;
+        pushToExtension({ type: 'acp/skillDraft', draft });
+      } else {
+        pushToExtension({ type: 'acp/skillDraftError', message: 'The agent did not return a valid skill.' });
+      }
+    } catch (e) {
+      pushToExtension({ type: 'acp/skillDraftError', message: String((e as any)?.message ?? e) });
+    }
+  }
+
+  /** Save a (possibly user-edited) skill draft. */
+  saveSkill(input: { id?: string; name: string; description?: string; inputs?: string[]; steps: string[]; actions?: unknown[] }) {
+    const { skill, exportedTo } = this.skills.save(input);
+    pushToExtension({ type: 'acp/skillSaved', id: skill.id, name: skill.name, exportedTo });
+    this.listSkills();
+  }
+
   cancel(sessionId: string) {
     this.client?.cancel(sessionId);
   }
@@ -696,6 +791,16 @@ const chat = new ChatManager();
 
 // ── Register the browser MCP with other agents (one click, no copy-paste) ───
 // Only harnesses with a non-interactive registration CLI are listed.
+/** Pull the first JSON object out of an agent reply (fenced or bare). */
+function extractJson(text: string): any | null {
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  const body = fence ? fence[1]! : text;
+  const start = body.indexOf('{');
+  const end = body.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try { return JSON.parse(body.slice(start, end + 1)); } catch { return null; }
+}
+
 function connectSpec(agentId: string): [string, string[]] | null {
   switch (agentId) {
     case 'claude': return ['claude', ['mcp', 'add', 'pilot', '--scope', 'user', '--', 'node', INDEX_JS]];
@@ -752,6 +857,8 @@ async function handleAcpMessage(msg: any) {
       case 'acp/connectAgent': connectAgent(msg.agentId); break;
       case 'acp/installAgent': chat.installAgent(msg.agentId); break;
       case 'acp/skillFromRecording': await chat.skillFromRecording(msg.sessionId, msg.steps); break;
+      case 'acp/authorSkill': await chat.authorSkill(msg.actions ?? [], msg.notes ?? [], msg.agentId, msg.model, msg.effort); break;
+      case 'acp/saveSkill': chat.saveSkill(msg.skill); break;
       default: console.error('[daemon] unknown acp message:', msg.type);
     }
   } catch (e) {
