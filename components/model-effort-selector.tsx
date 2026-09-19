@@ -1,6 +1,6 @@
 import { DropdownMenu } from 'radix-ui';
 import { CheckIcon, ChevronDownIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSettings } from '@/entrypoints/sidepanel/settings-store';
 import { AGENT_CAPS, CLAUDE_MODELS } from '@/entrypoints/sidepanel/settings';
 import { resetSession } from '@/entrypoints/sidepanel/adapter';
@@ -25,16 +25,33 @@ const item = 'flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text
 export function ModelEffortSelector() {
   const { settings, update } = useSettings();
   const [draft, setDraft] = useState('');
+  const [models, setModels] = useState<string[]>([]);
 
   const caps = AGENT_CAPS[settings.agentId];
   const isClaude = settings.agentId === 'claude';
-  const showModel = caps.modelControl !== 'none' && (isClaude || settings.byoEnabled);
+  // Claude presets, or a fetched list (opencode models), or BYO freeform.
+  const showModel = caps.modelControl !== 'none';
+
+  // Fetch the agent's model list (e.g. `opencode models`) for the picker.
+  useEffect(() => {
+    const onMsg = (m: any) => {
+      if (m?.kind === 'ACP_UPDATE' && m.payload?.type === 'acp/agentModels') {
+        setModels(m.payload.models ?? []);
+      }
+    };
+    chrome.runtime.onMessage.addListener(onMsg);
+    if (settings.agentId !== 'claude' && caps.modelControl !== 'none') {
+      chrome.runtime
+        .sendMessage({ kind: 'ACP_SEND', payload: { type: 'acp/agentModels', agentId: settings.agentId } })
+        .catch(() => {});
+    }
+    return () => chrome.runtime.onMessage.removeListener(onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.agentId]);
 
   const modelLabel = isClaude
     ? CLAUDE_MODELS.find((m) => m.id === settings.model)?.label ?? 'Default'
-    : settings.byoModel
-      ? settings.byoModel
-      : null;
+    : settings.model || settings.byoModel || (models ? 'Default' : null);
   const effortLabel = EFFORTS.find((e) => e.id === settings.effort)?.label ?? 'Medium';
 
   const changeModel = (model: string) => {
@@ -90,6 +107,21 @@ export function ModelEffortSelector() {
                 <DropdownMenu.Item key={m.id} className={item} onSelect={() => changeModel(m.id)}>
                   <span className="flex-1">{m.label}</span>
                   {settings.model === m.id && <CheckIcon className="size-3.5" />}
+                </DropdownMenu.Item>
+              ))}
+            </>
+          )}
+          {!isClaude && models.length > 0 && (
+            <>
+              <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">Model</div>
+              <DropdownMenu.Item className={item} onSelect={() => changeModel('')}>
+                <span className="flex-1">Default</span>
+                {!settings.model && <CheckIcon className="size-3.5" />}
+              </DropdownMenu.Item>
+              {models.map((m) => (
+                <DropdownMenu.Item key={m} className={item} onSelect={() => changeModel(m)}>
+                  <span className="min-w-0 flex-1 truncate">{m}</span>
+                  {settings.model === m && <CheckIcon className="size-3.5 shrink-0" />}
                 </DropdownMenu.Item>
               ))}
             </>
