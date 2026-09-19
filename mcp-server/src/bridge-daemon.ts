@@ -58,6 +58,11 @@ const INDEX_JS = resolvePath(dirname(fileURLToPath(import.meta.url)), 'index.js'
 const EXT_PATH = process.env.PILOT_EXTENSION_PATH
   ?? resolvePath(dirname(INDEX_JS), '..', '..', '.output', 'chrome-mv3');
 
+// Neutral working directory for the ACP agent: a dedicated empty folder so the
+// agent doesn't wander into (or run commands in) the user's project folders.
+const AGENT_CWD = process.env.PILOT_AGENT_CWD ?? join(homedir(), '.pilot', 'cwd');
+try { mkdirSync(AGENT_CWD, { recursive: true }); } catch { /* ignore */ }
+
 function findBrowserBinary(): string | undefined {
   const explicit = process.env.PILOT_BROWSER_BIN;
   if (explicit && existsSync(explicit)) return explicit;
@@ -198,7 +203,9 @@ const PILOT_SYSTEM_PROMPT =
   'Every message includes the page the user is currently viewing. ' +
   'ALWAYS use these browser_* tools for any web browsing or page interaction — never launch a ' +
   'separate or headless browser, and do not browse the web with any other tool. These browser_* ' +
-  'tools are your ONLY tools; do not search for other tools. Typical flow: browser_snapshot -> ' +
+  'tools are your ONLY tools; do not search for other tools. Do NOT run shell commands, read/write ' +
+  'files, or explore the filesystem — ignore your working directory entirely; everything happens ' +
+  'through the browser_* tools. Typical flow: browser_snapshot -> ' +
   'browser_click/browser_type; browser_get_text to read the page. You can also record the user\'s ' +
   'actions and author skills via the recorder_* tools. ' +
   'When you replay a saved skill with browser_run_skill, check the per-step results: if a step ' +
@@ -586,7 +593,7 @@ class ChatManager {
     const key = `${base}:effort-${effort ?? 'medium'}`;
     const client = await this.ensureClient(key, id, def);
     const mcpServers = def.mcp ? [this.browserMcp()] : [];
-    const sessionId = await client.newSession(process.cwd(), mcpServers, meta);
+    const sessionId = await client.newSession(AGENT_CWD, mcpServers, meta);
     this.store.create(sessionId, { agentId: id, model, effort, cmd, args });
     this.live.add(sessionId);
     pushToExtension({ type: 'acp/sessionCreated', sessionId });
@@ -610,7 +617,7 @@ class ChatManager {
         const base = agentId === 'custom' ? `custom:${sess?.cmd ?? ''} ${(sess?.args ?? []).join(' ')}` : agentId;
         const key = `${base}:effort-${effort}`;
         const client = await this.ensureClient(key, agentId, def);
-        await client.loadSession(sessionId, process.cwd(), def.mcp ? [this.browserMcp()] : []);
+        await client.loadSession(sessionId, AGENT_CWD, def.mcp ? [this.browserMcp()] : []);
         this.live.add(sessionId);
         // Backfill launch info so future resumes pick the right agent.
         this.store.setMeta(sessionId, { agentId, model: sess?.model ?? modelHint, effort });
@@ -671,7 +678,7 @@ class ChatManager {
       const effort = effortHint ?? 'medium';
       const key = `${id}:effort-${effort}`;
       const client = await this.ensureClient(key, id, def);
-      const sid = await client.newSession(process.cwd(), [], {
+      const sid = await client.newSession(AGENT_CWD, [], {
         systemPrompt: 'You only output strict JSON. No prose, no markdown fences.',
       });
       const entry = { text: '' };

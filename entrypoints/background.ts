@@ -231,7 +231,7 @@ export default defineBackground(() => {
       .map((t) => ({ tabId: t.id!, url: t.url ?? '', title: t.title ?? '', active: !!t.active }));
   }
 
-  /** The tab Pilot drives: reuse the Pilot-group tab, else open a fresh one. */
+  /** The tab Pilot drives: reuse the Pilot-group tab, else open a blank one. */
   async function ensurePilotTab(): Promise<chrome.tabs.Tab> {
     const groupId = await pilotGroupId();
     if (groupId != null) {
@@ -239,14 +239,9 @@ export default defineBackground(() => {
       const t = tabs.find((x) => x.id != null);
       if (t) return t;
     }
-    // New Pilot tab. Open the page the user is currently viewing, so the agent
-    // starts on "this page" — without touching the user's own tab.
-    let url = 'about:blank';
-    try {
-      const active = await liveActiveTab();
-      if (/^https?:/.test(active.url ?? '')) url = active.url!;
-    } catch { /* keep about:blank */ }
-    const created = await chrome.tabs.create({ url, active: true });
+    // A blank Pilot tab — the agent decides what to open/navigate there. Never
+    // copy the user's own tab (that surprised them).
+    const created = await chrome.tabs.create({ url: 'about:blank', active: true });
     if (created.id != null) await groupTab(created.id);
     return created;
   }
@@ -378,12 +373,24 @@ export default defineBackground(() => {
     }
   }
 
-  /** Resolve the tab a command targets: explicit tabId wins, else the active/pinned tab. */
+  /** Resolve the tab a command targets: explicit tabId wins, else the Pilot
+   *  group (created if needed) — so actions never hijack the user's own tab. */
   async function resolveTab(params: Record<string, unknown>): Promise<chrome.tabs.Tab> {
     if (typeof params.tabId === 'number') {
       try { return await chrome.tabs.get(params.tabId); } catch { /* fall through */ }
     }
-    return getActiveTab();
+    if (pinnedTabId != null) {
+      try { return await chrome.tabs.get(pinnedTabId); } catch { pinnedTabId = null; }
+    }
+    const groupId = await pilotGroupId();
+    if (groupId != null) {
+      const tabs = await chrome.tabs.query({ groupId });
+      const t = tabs.find((x) => x.id != null);
+      if (t) { pinnedTabId = t.id!; return t; }
+    }
+    const created = await ensurePilotTab();
+    pinnedTabId = created.id ?? null;
+    return created;
   }
 
   const PAGE_METHODS = new Set([
@@ -670,13 +677,17 @@ export default defineBackground(() => {
 
     // ── Pin the current tab for the duration of a turn ──
     if ((message as { type?: string }).type === 'PIN_TAB') {
-      // Pilot works in its OWN tab (reused across the session), so the turn
-      // never hijacks whatever tab the user is currently on.
-      ensurePilotTab()
-        .then(async (t) => {
-          pinnedTabId = t.id ?? null;
-          if (t.id != null) await groupTab(t.id);
-          sendResponse({ tabId: t.id ?? null, url: t.url ?? '', title: t.title ?? '' });
+      // Context = the page the user is actually viewing (so the agent knows
+      // "this page"). The action target stays the Pilot group, created lazily
+      // on the first action — never the user's own tab.
+      liveActiveTab()
+        .then(async (ctx) => {
+          const groupId = await pilotGroupId();
+          const pilot = groupId != null
+            ? (await chrome.tabs.query({ groupId })).find((x) => x.id != null)
+            : undefined;
+          pinnedTabId = pilot?.id ?? null;
+          sendResponse({ tabId: ctx.id ?? null, url: ctx.url ?? '', title: ctx.title ?? '' });
         })
         .catch(() => sendResponse({ url: '', title: '' }));
       return true; // async response
