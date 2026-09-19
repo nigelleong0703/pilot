@@ -32,12 +32,14 @@ unzip -oq "$DEST/pilot.zip" -d "$OUT"
 echo "  unpacked → $OUT"
 
 # 2. MCP server ----------------------------------------------------------------
-if [ -n "${TGZ_URL:-}" ] && command -v npm >/dev/null 2>&1; then
-  echo "→ Installing the MCP server (pilot-mcp)…"
-  if npm install -g "$TGZ_URL" >/dev/null 2>&1; then
+if command -v npm >/dev/null 2>&1; then
+  echo "→ Installing the MCP server (@nigelleong0703/pilot-mcp)…"
+  if npm install -g @nigelleong0703/pilot-mcp >/dev/null 2>&1; then
     echo "  installed"
+  elif [ -n "${TGZ_URL:-}" ] && npm install -g "$TGZ_URL" >/dev/null 2>&1; then
+    echo "  installed (from release)"
   else
-    echo "  ⚠ failed — install manually:  npm install -g $TGZ_URL"
+    echo "  ⚠ failed — install manually:  npm install -g @nigelleong0703/pilot-mcp"
   fi
 fi
 

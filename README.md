@@ -44,7 +44,7 @@
 **2. The agent bridge (MCP server)** — one command (installs the `pilot-mcp` binary):
 
 ```bash
-npm install -g https://github.com/nigelleong0703/pilot/releases/latest/download/pilot-mcp-1.0.0.tgz
+npm install -g @nigelleong0703/pilot-mcp
 # or from source:  cd mcp-server && npm install && npm run build
 ```
 

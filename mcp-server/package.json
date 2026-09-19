@@ -1,5 +1,5 @@
 {
-  "name": "pilot-mcp",
+  "name": "@nigelleong0703/pilot-mcp",
   "version": "1.0.0",
   "description": "MCP server that lets a local AI drive the browser through the Pilot extension (and replay recorded skills).",
   "type": "module",
