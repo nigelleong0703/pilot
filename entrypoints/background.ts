@@ -231,21 +231,6 @@ export default defineBackground(() => {
       .map((t) => ({ tabId: t.id!, url: t.url ?? '', title: t.title ?? '', active: !!t.active }));
   }
 
-  /** The tab Pilot drives: reuse the Pilot-group tab, else open a blank one. */
-  async function ensurePilotTab(): Promise<chrome.tabs.Tab> {
-    const groupId = await pilotGroupId();
-    if (groupId != null) {
-      const tabs = await chrome.tabs.query({ groupId });
-      const t = tabs.find((x) => x.id != null);
-      if (t) return t;
-    }
-    // A blank Pilot tab — the agent decides what to open/navigate there. Never
-    // copy the user's own tab (that surprised them).
-    const created = await chrome.tabs.create({ url: 'about:blank', active: true });
-    if (created.id != null) await groupTab(created.id);
-    return created;
-  }
-
   /** Remove every tab from the Pilot group (called on a new chat). */
   async function clearPilotGroup() {
     const groupId = await pilotGroupId();
@@ -373,8 +358,9 @@ export default defineBackground(() => {
     }
   }
 
-  /** Resolve the tab a command targets: explicit tabId wins, else the Pilot
-   *  group (created if needed) — so actions never hijack the user's own tab. */
+  /** Resolve the tab a command targets. NEVER creates a tab implicitly:
+   *  explicit tabId → the pinned/Pilot-group tab → the user's current tab.
+   *  A dedicated workspace tab is opened only by browser_new_tab (the model). */
   async function resolveTab(params: Record<string, unknown>): Promise<chrome.tabs.Tab> {
     if (typeof params.tabId === 'number') {
       try { return await chrome.tabs.get(params.tabId); } catch { /* fall through */ }
@@ -388,9 +374,7 @@ export default defineBackground(() => {
       const t = tabs.find((x) => x.id != null);
       if (t) { pinnedTabId = t.id!; return t; }
     }
-    const created = await ensurePilotTab();
-    pinnedTabId = created.id ?? null;
-    return created;
+    return liveActiveTab();
   }
 
   const PAGE_METHODS = new Set([

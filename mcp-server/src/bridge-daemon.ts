@@ -217,6 +217,20 @@ const PILOT_SYSTEM_PROMPT =
   'once a skill works reliably, leave it alone.';
 
 interface AgentDef { spawn: () => AgentSpawn; meta: () => unknown; mcp: boolean; }
+/** Inline opencode config (OPENCODE_CONFIG_CONTENT) that makes it browser-only. */
+const OPENCODE_BROWSER_ONLY = JSON.stringify({
+  $schema: 'https://opencode.ai/config.json',
+  tools: {
+    bash: false, edit: false, write: false, patch: false, read: false,
+    glob: false, grep: false, list: false, webfetch: false, websearch: false,
+    task: false, lsp: false,
+  },
+  permission: {
+    bash: 'deny', edit: 'deny', read: 'deny', glob: 'deny', grep: 'deny',
+    webfetch: 'deny', websearch: 'deny', task: 'deny',
+  },
+});
+
 const AGENTS: Record<string, AgentDef> = {
   claude: { spawn: claudeSpawn, meta: claudeMeta, mcp: true },
   gemini: {
@@ -260,7 +274,15 @@ const AGENTS: Record<string, AgentDef> = {
   opencode: {
     // Ships its own ACP (`opencode acp`) and is MCP-native, so client MCP
     // servers in session/new should attach. BYO via standard provider env keys.
-    spawn: () => ({ command: process.env.ACP_OPENCODE_CMD ?? 'opencode', args: splitArgs(process.env.ACP_OPENCODE_ARGS).length ? splitArgs(process.env.ACP_OPENCODE_ARGS) : ['acp'], shell: win }),
+    // Pilot is a BROWSER agent: inject an inline opencode config that hides/denies
+    // the coding tools (bash/read/edit/glob/grep/task/webfetch…), leaving only the
+    // browser MCP tools. Set PILOT_OPENCODE_FULL=1 to opt out.
+    spawn: () => ({
+      command: process.env.ACP_OPENCODE_CMD ?? 'opencode',
+      args: splitArgs(process.env.ACP_OPENCODE_ARGS).length ? splitArgs(process.env.ACP_OPENCODE_ARGS) : ['acp'],
+      shell: win,
+      env: process.env.PILOT_OPENCODE_FULL === '1' ? undefined : { OPENCODE_CONFIG_CONTENT: OPENCODE_BROWSER_ONLY },
+    }),
     meta: genericMeta,
     mcp: true,
   },
