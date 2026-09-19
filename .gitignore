@@ -6,6 +6,7 @@ stats.html
 
 dist
 *.log
+*.tgz
 .env
 .env.*
 .DS_Store

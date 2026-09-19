@@ -48,7 +48,7 @@ async function run() {
     console.log('✓ recording started');
 
     const page = await context.newPage();
-    await page.goto(pathToFileURL(resolve(root, 'test.html')).href);
+    await page.goto(pathToFileURL(resolve(root, 'test', 'index.html')).href);
 
     // Drive the form — each interaction should become one recorded step.
     await page.fill('#name', 'Jane Doe');
