@@ -31,6 +31,7 @@ export type BridgeMethod =
   | 'selectOption'
   | 'getText'
   | 'listTabs'
+  | 'newTab'
   | 'replay'
   | 'recorder.start'
   | 'recorder.stop'

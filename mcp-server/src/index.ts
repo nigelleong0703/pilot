@@ -282,6 +282,21 @@ server.registerTool(
 );
 
 server.registerTool(
+  'browser_new_tab',
+  {
+    title: 'Open a new tab',
+    description:
+      'Open a URL in a NEW tab inside the Pilot group and target it (returns tabId). Use this ' +
+      'when the task is on a different page/site, instead of overwriting the tab the user is ' +
+      'actively using. Omit `url` to open a blank Pilot tab.',
+    inputSchema: {
+      url: z.string().describe('Absolute URL to open (or "" for a blank tab)').optional(),
+    },
+  },
+  async ({ url }) => asText(await call('newTab', { url })),
+);
+
+server.registerTool(
   'browser_navigate',
   {
     title: 'Navigate',

@@ -387,7 +387,7 @@ export default defineBackground(() => {
   }
 
   const PAGE_METHODS = new Set([
-    'navigate', 'snapshot', 'click', 'type', 'selectOption', 'getText', 'screenshot', 'replay',
+    'navigate', 'snapshot', 'click', 'type', 'selectOption', 'getText', 'screenshot', 'replay', 'newTab',
   ]);
 
   // ── Deterministic replay ─────────────────────────────────────────────────
@@ -534,7 +534,21 @@ export default defineBackground(() => {
         // Multi-tab workflows: tabs the user (or the agent) has placed in the
         // Pilot group. Falls back to the active tab so single-tab use still works.
         const tabs = await groupTabs();
-        return { group: 'Pilot', tabs };
+        let active: { tabId?: number; url: string; title: string } | undefined;
+        try { const t = await liveActiveTab(); active = { tabId: t.id, url: t.url ?? '', title: t.title ?? '' }; } catch { /* ignore */ }
+        return { group: 'Pilot', tabs, activeTab: active };
+      }
+      case 'newTab': {
+        // Open a dedicated tab in the Pilot group so the agent never hijacks a
+        // tab the user is actively using.
+        const url = typeof p.url === 'string' && p.url ? p.url : 'about:blank';
+        const created = await chrome.tabs.create({ url, active: true });
+        if (created.id != null) {
+          await groupTab(created.id);
+          pinnedTabId = created.id;
+          pingAgentActive(created.id);
+        }
+        return { tabId: created.id ?? null, url: created.url ?? url, title: created.title ?? '' };
       }
       case 'replay': {
         const tab = await resolveTab(p);
