@@ -18,7 +18,7 @@
   <a href="https://github.com/nigelleong0703/pilot/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/nigelleong0703/pilot?style=social"></a>
 </p>
 
-<p align="center"><img src="assets/screenshot.png" alt="Pilot side panel" width="720" /></p>
+<p align="center"><img src="assets/demo.gif" alt="Pilot side panel" width="440" /></p>
 
 ---
 

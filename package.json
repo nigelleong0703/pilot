@@ -1,7 +1,7 @@
 {
   "name": "pilot",
-  "version": "1.0.0",
-  "description": "Pilot — a local browser agent: chat with an AI that drives the page, record actions (with voice) into reusable skills, and share the browser tools with other agents.",
+  "version": "1.1.0",
+  "description": "Pilot \u2014 a local browser agent: chat with an AI that drives the page, record actions (with voice) into reusable skills, and share the browser tools with other agents.",
   "private": true,
   "type": "module",
   "scripts": {
