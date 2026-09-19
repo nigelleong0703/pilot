@@ -105,7 +105,7 @@ export function ModelEffortSelector() {
           align="start"
           side="top"
           sideOffset={6}
-          className="z-50 min-w-44 rounded-md border bg-card p-1 text-card-foreground shadow-md"
+          className="z-50 max-h-[min(70vh,420px)] min-w-52 overflow-y-auto rounded-md border bg-card p-1 text-card-foreground shadow-md"
         >
           {isClaude && (
             <>

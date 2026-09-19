@@ -51,7 +51,7 @@ export interface AgentCapabilities {
 export const AGENT_CAPS: Record<AgentId, AgentCapabilities> = {
   claude:   { modelControl: 'presets', effort: true,  byoFlags: false, byoEnv: true,  mcp: true },
   gemini:   { modelControl: 'none',    effort: false, byoFlags: false, byoEnv: true,  mcp: true },
-  codex:    { modelControl: 'none',    effort: false, byoFlags: false, byoEnv: false, mcp: true },
+  codex:    { modelControl: 'freeform', effort: false, byoFlags: false, byoEnv: false, mcp: true },
   pi:       { modelControl: 'none',    effort: false, byoFlags: false, byoEnv: true,  mcp: false },
   opencode: { modelControl: 'freeform', effort: false, byoFlags: true, byoEnv: true,  mcp: true },
   qwen:     { modelControl: 'freeform', effort: false, byoFlags: true, byoEnv: true,  mcp: true },

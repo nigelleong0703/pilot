@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve as resolvePath, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
-import { createWriteStream, mkdirSync, existsSync } from 'node:fs';
+import { createWriteStream, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { AcpClient, type McpServerSpec, type AgentSpawn } from './acp-client.js';
 import { ChatStore } from './chat-store.js';
@@ -607,7 +607,7 @@ class ChatManager {
     const raw = id === 'custom' && cmd
       ? () => ({ command: cmd, args: args ?? [], shell: win })
       : agentDef(id).spawn;
-    const acceptsModel = id === 'opencode' || id === 'qwen';
+    const acceptsModel = id === 'opencode' || id === 'qwen' || id === 'codex';
     const modelSpawn = () => {
       const s = raw();
       return model && acceptsModel ? { ...s, args: [...s.args, '--model', model] } : s;
@@ -827,8 +827,18 @@ class ChatManager {
     pushToExtension({ type: 'acp/agentStatus', status, mcpPath: INDEX_JS });
   }
 
-  /** List the models an agent exposes (e.g. `opencode models`) for the picker. */
+  /** List the models an agent exposes (opencode CLI, codex model cache). */
   agentModels(agentId: string) {
+    if (agentId === 'codex') {
+      try {
+        const d = JSON.parse(readFileSync(join(homedir(), '.codex', 'models_cache.json'), 'utf8'));
+        const models = (d.models ?? []).map((m: any) => ({
+          id: m.slug, name: m.display_name ?? m.slug, description: m.description,
+        })).filter((m: any) => m.id);
+        pushToExtension({ type: 'acp/agentModels', models });
+      } catch { pushToExtension({ type: 'acp/agentModels', models: [] }); }
+      return;
+    }
     const cmds: Record<string, [string, string[]]> = {
       opencode: [process.env.ACP_OPENCODE_CMD ?? 'opencode', ['models']],
     };
