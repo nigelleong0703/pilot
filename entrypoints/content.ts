@@ -234,7 +234,7 @@ export default defineContentScript({
       if (existing) return;
       const b = document.createElement('div');
       b.id = BANNER_ID;
-      b.textContent = '⏺ Browser Extension — recording this tab';
+      b.textContent = '⏺ Pilot — recording this tab';
       Object.assign(b.style, {
         position: 'fixed',
         top: '0',

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * My Recorder MCP server (thin client).
+ * Pilot MCP server (thin client).
  *
  * Connects a local AI (over MCP/stdio) to the shared bridge DAEMON, which owns
  * the single connection to the browser extension. Decoupling the bridge from
@@ -104,7 +104,7 @@ function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 
     return Promise.reject(
       new Error(
         'Bridge not ready yet. The daemon is starting — retry shortly, and make sure ' +
-          'the browser with the "Browser Extension" extension is open.',
+          'the browser with the Pilot extension is open.',
       ),
     );
   }
@@ -549,7 +549,7 @@ server.registerTool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('[mcp] my-recorder MCP server ready on stdio');
+  console.error('[mcp] pilot MCP server ready on stdio');
 }
 
 main().catch((err) => {

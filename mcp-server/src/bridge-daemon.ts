@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Browser Extension bridge daemon.
+ * Pilot bridge daemon.
  *
  * One long-lived broker with THREE jobs:
  *
@@ -1047,4 +1047,4 @@ cliWss.on('connection', (ws) => {
   });
 });
 
-console.error('[daemon] Browser Extension bridge daemon starting…');
+console.error('[daemon] Pilot bridge daemon starting…');

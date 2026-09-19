@@ -1,13 +1,13 @@
 {
   "mcpServers": {
-    "browser-extension": {
+    "pilot": {
       "command": "node",
       "args": [
         "mcp-server/dist/index.js"
       ],
       "env": {
         "MCP_BRIDGE_CLIENT_PORT": "9235",
-        "MCP_SESSION_LABEL": "browser-ext"
+        "MCP_SESSION_LABEL": "pilot"
       }
     }
   }
