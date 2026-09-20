@@ -196,12 +196,10 @@ const PILOT_SYSTEM_PROMPT =
   'browser_type, browser_select_option, browser_get_text, browser_screenshot). browser_list_tabs ' +
   'lists ALL of the user\'s open tabs (each with a tabId) and flags the ones in the "Pilot" group; ' +
   'use it to find a tab the user already has open when they refer to one. ' +
-  'There is ONE reusable workspace tab in the Pilot group — do your navigation and clicks THERE and ' +
-  'REUSE it; do NOT open a new tab for each step. Decide from context: reuse the workspace tab for ' +
-  'normal navigation/clicks, and call browser_new_tab only when the task genuinely needs an extra ' +
-  'page open in parallel (a multi-tab workflow). Do NOT navigate or overwrite a tab the user is ' +
-  'actively using (their YouTube, email, docs…) unless the task is about that tab; to work on one ' +
-  'of their tabs, pass its tabId to the browser_* tools. ' +
+  'By default you act on the tab the user is currently viewing — that IS "this page". Do your ' +
+  'navigation and clicks there; call browser_new_tab only when the task genuinely needs an extra ' +
+  'page open in parallel (a multi-tab workflow). To work on a different tab, pass its tabId to the ' +
+  'browser_* tools. ' +
   'Every message already includes the page the user is viewing (its URL, title, and a list of ' +
   'interactive elements), so you start out aware of the page — only call browser_snapshot again ' +
   'when the page changed after your own actions or you need element refs to click. ' +

@@ -358,29 +358,8 @@ export default defineBackground(() => {
     }
   }
 
-  /** One reusable Pilot workspace tab (created once, de-duped under concurrency). */
-  let workspaceCreating: Promise<chrome.tabs.Tab> | null = null;
-  async function ensureWorkspaceTab(): Promise<chrome.tabs.Tab> {
-    const groupId = await pilotGroupId();
-    if (groupId != null) {
-      const t = (await chrome.tabs.query({ groupId })).find((x) => x.id != null);
-      if (t) return t;
-    }
-    if (!workspaceCreating) {
-      workspaceCreating = chrome.tabs
-        .create({ url: 'about:blank', active: true })
-        .then(async (t) => {
-          if (t.id != null) await groupTab(t.id);
-          workspaceCreating = null;
-          return t;
-        })
-        .catch((e) => { workspaceCreating = null; throw e; });
-    }
-    return workspaceCreating;
-  }
-
-  /** Resolve the tab a command targets. NEVER creates a tab per call: explicit
-   *  tabId → pinned/Pilot-group tab → the single workspace tab (created once). */
+  /** Resolve the tab a command targets. Explicit tabId → pinned tab → the tab
+   *  the user is currently viewing. Never creates a new tab per call. */
   async function resolveTab(params: Record<string, unknown>): Promise<chrome.tabs.Tab> {
     if (typeof params.tabId === 'number') {
       try { return await chrome.tabs.get(params.tabId); } catch { /* fall through */ }
@@ -388,7 +367,7 @@ export default defineBackground(() => {
     if (pinnedTabId != null) {
       try { return await chrome.tabs.get(pinnedTabId); } catch { pinnedTabId = null; }
     }
-    const t = await ensureWorkspaceTab();
+    const t = await liveActiveTab();
     pinnedTabId = t.id ?? null;
     return t;
   }
@@ -755,16 +734,11 @@ export default defineBackground(() => {
 
     // ── Pin the current tab for the duration of a turn ──
     if ((message as { type?: string }).type === 'PIN_TAB') {
-      // Context = the page the user is actually viewing (so the agent knows
-      // "this page"). The action target stays the Pilot group, created lazily
-      // on the first action — never the user's own tab.
+      // The agent acts on the page the user is actually viewing (so "this page"
+      // means the same thing to both of us) — no blank workspace tab is created.
       liveActiveTab()
-        .then(async (ctx) => {
-          const groupId = await pilotGroupId();
-          const pilot = groupId != null
-            ? (await chrome.tabs.query({ groupId })).find((x) => x.id != null)
-            : undefined;
-          pinnedTabId = pilot?.id ?? null;
+        .then((ctx) => {
+          pinnedTabId = ctx.id ?? null;
           sendResponse({ tabId: ctx.id ?? null, url: ctx.url ?? '', title: ctx.title ?? '' });
         })
         .catch(() => sendResponse({ url: '', title: '' }));
