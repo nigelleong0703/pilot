@@ -219,19 +219,26 @@ const PILOT_SYSTEM_PROMPT =
   'once a skill works reliably, leave it alone.';
 
 interface AgentDef { spawn: () => AgentSpawn; meta: () => unknown; mcp: boolean; }
-/** Inline opencode config (OPENCODE_CONFIG_CONTENT) that makes it browser-only. */
-const OPENCODE_BROWSER_ONLY = JSON.stringify({
-  $schema: 'https://opencode.ai/config.json',
-  tools: {
-    bash: false, edit: false, write: false, patch: false, read: false,
-    glob: false, grep: false, list: false, webfetch: false, websearch: false,
-    task: false, lsp: false,
-  },
-  permission: {
-    bash: 'deny', edit: 'deny', read: 'deny', glob: 'deny', grep: 'deny',
-    webfetch: 'deny', websearch: 'deny', task: 'deny',
-  },
-});
+/** Inline opencode config (OPENCODE_CONFIG_CONTENT): browser-only + chosen model.
+ *  opencode's `acp` command has NO --model flag (passing it prints help and
+ *  exits 1), so the model must be set here as `model: "provider/model"`. */
+function opencodeConfigContent(model?: string): string {
+  const cfg: Record<string, unknown> = {
+    $schema: 'https://opencode.ai/config.json',
+    tools: {
+      bash: false, edit: false, write: false, patch: false, read: false,
+      glob: false, grep: false, list: false, webfetch: false, websearch: false,
+      task: false, lsp: false,
+    },
+    permission: {
+      bash: 'deny', edit: 'deny', read: 'deny', glob: 'deny', grep: 'deny',
+      webfetch: 'deny', websearch: 'deny', task: 'deny',
+    },
+  };
+  if (model && model.trim()) cfg.model = model.trim();
+  return JSON.stringify(cfg);
+}
+const OPENCODE_BROWSER_ONLY = opencodeConfigContent();
 
 const AGENTS: Record<string, AgentDef> = {
   claude: { spawn: claudeSpawn, meta: claudeMeta, mcp: true },
@@ -417,10 +424,10 @@ function byoArgs(agentId: string, byo: ByoConfig): string[] {
   // NOTE: pi-acp does NOT parse --provider/--model (only --terminal-login), so
   // Pi is deliberately excluded — its model is set inside pi itself (/model).
   if (agentId === 'opencode') {
-    const args = [];
-    if (m) args.push('--model', m); // opencode format: provider/model
-    else args.push('--model', p);
-    return args;
+    // opencode's `acp` accepts NO CLI flags for provider/model (it would print
+    // help and exit 1). BYO provider keys are set via env; the model goes in
+    // through OPENCODE_CONFIG_CONTENT (see modelSpawn).
+    return [];
   }
   if (agentId === 'qwen' && (m || p)) {
     const args = ['--provider', p];
@@ -605,12 +612,18 @@ class ChatManager {
     // A "custom" agent runs a command supplied by the side panel; everything
     // else comes from the built-in registry. Agents that accept --model
     // (opencode/qwen) get the chosen model; Claude gets it via meta.
-    const raw = id === 'custom' && cmd
+    const raw: () => AgentSpawn = id === 'custom' && cmd
       ? () => ({ command: cmd, args: args ?? [], shell: win })
       : agentDef(id).spawn;
     const acceptsModel = id === 'opencode' || id === 'qwen' || id === 'codex';
     const modelSpawn = () => {
       const s = raw();
+      if (id === 'opencode') {
+        // opencode's `acp` has no --model flag; inject it into the inline config.
+        if (process.env.PILOT_OPENCODE_FULL === '1') return s;
+        const mdl = (model ?? byo?.model ?? '').trim();
+        return mdl ? { ...s, env: { ...s.env, OPENCODE_CONFIG_CONTENT: opencodeConfigContent(mdl) } } : s;
+      }
       return model && acceptsModel ? { ...s, args: [...s.args, '--model', model] } : s;
     };
     const def: AgentDef =
