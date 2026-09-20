@@ -578,6 +578,14 @@ export default defineBackground(() => {
         }
         return { tabId: created.id ?? null, url: created.url ?? url, title: created.title ?? '' };
       }
+      case 'closeTab': {
+        // Close a specific tab by tabId (any window). Clears the pin if needed.
+        const id = typeof p.tabId === 'number' ? p.tabId : undefined;
+        if (id == null) throw new Error('closeTab: tabId required');
+        if (pinnedTabId === id) pinnedTabId = null;
+        try { await chrome.tabs.remove(id); } catch (e) { throw new Error(`closeTab: ${(e as Error).message}`); }
+        return { closed: id };
+      }
       case 'replay': {
         const tab = await resolveTab(p);
         const actions = Array.isArray(p.actions) ? (p.actions as Array<Record<string, unknown>>) : [];

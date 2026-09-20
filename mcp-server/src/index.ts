@@ -298,6 +298,20 @@ server.registerTool(
 );
 
 server.registerTool(
+  'browser_close_tab',
+  {
+    title: 'Close a tab',
+    description:
+      'Close a browser tab by its tabId (from browser_list_tabs). Works across windows, ' +
+      'unlike trying to close tabs by hand.',
+    inputSchema: {
+      tabId: z.number().int().describe('Tab to close (from browser_list_tabs)'),
+    },
+  },
+  async ({ tabId }) => asText(await call('closeTab', { tabId })),
+);
+
+server.registerTool(
   'browser_navigate',
   {
     title: 'Navigate',

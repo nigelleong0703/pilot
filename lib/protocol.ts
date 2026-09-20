@@ -32,6 +32,7 @@ export type BridgeMethod =
   | 'getText'
   | 'listTabs'
   | 'newTab'
+  | 'closeTab'
   | 'replay'
   | 'clickAt'
   | 'typeText'

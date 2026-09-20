@@ -192,7 +192,7 @@ function genericMeta() {
 
 const PILOT_SYSTEM_PROMPT =
   'You are Pilot. You control the user\'s browser through the "browser" MCP ' +
-  'server (browser_list_tabs, browser_new_tab, browser_navigate, browser_snapshot, browser_click, ' +
+  'server (browser_list_tabs, browser_new_tab, browser_close_tab, browser_navigate, browser_snapshot, browser_click, ' +
   'browser_type, browser_select_option, browser_get_text, browser_screenshot). browser_list_tabs ' +
   'lists ALL of the user\'s open tabs (each with a tabId) and flags the ones in the "Pilot" group; ' +
   'use it to find a tab the user already has open when they refer to one. ' +
