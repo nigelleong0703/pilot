@@ -539,12 +539,32 @@ export default defineBackground(() => {
     }
     switch (req.method) {
       case 'listTabs': {
-        // Multi-tab workflows: tabs the user (or the agent) has placed in the
-        // Pilot group. Falls back to the active tab so single-tab use still works.
-        const tabs = await groupTabs();
+        // ALL open tabs in normal windows, so the agent can find & target the
+        // tab the user is actually looking at (not just the Pilot workspace).
+        // Tabs in the Pilot group are flagged. Pass any tabId to the other
+        // browser_* tools to act on that specific tab.
+        const groupId = await pilotGroupId();
         let active: { tabId?: number; url: string; title: string } | undefined;
         try { const t = await liveActiveTab(); active = { tabId: t.id, url: t.url ?? '', title: t.title ?? '' }; } catch { /* ignore */ }
-        return { group: 'Pilot', tabs, activeTab: active };
+        const all = await chrome.tabs.query({ windowType: 'normal' });
+        const tabs = (all ?? [])
+          .filter((t) => t.id != null && !/^(chrome-extension|devtools|chrome-search|chrome-untrusted|chrome):/.test(t.url ?? ''))
+          .map((t) => ({
+            tabId: t.id!,
+            url: t.url ?? '',
+            title: t.title ?? '',
+            active: !!t.active,
+            windowId: t.windowId,
+            pilotGroup: groupId != null && t.groupId === groupId,
+          }));
+        const focusedWin = active?.tabId != null ? tabs.find((t) => t.tabId === active!.tabId)?.windowId : undefined;
+        tabs.sort(
+          (a, b) =>
+            Number(b.pilotGroup) - Number(a.pilotGroup) ||
+            Number(b.windowId === focusedWin) - Number(a.windowId === focusedWin) ||
+            Number(b.active) - Number(a.active),
+        );
+        return { group: 'Pilot', count: tabs.length, activeTab: active, tabs };
       }
       case 'newTab': {
         // Open a dedicated tab in the Pilot group so the agent never hijacks a

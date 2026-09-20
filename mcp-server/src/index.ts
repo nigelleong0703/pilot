@@ -271,11 +271,12 @@ server.registerTool(
 server.registerTool(
   'browser_list_tabs',
   {
-    title: 'List Pilot tabs',
+    title: 'List open tabs',
     description:
-      'Return the tabs in the Pilot group (the multi-tab workspace: the page Pilot is driving ' +
-      'plus any tabs the user dragged in). Each entry has a "tabId" you can pass to the other ' +
-      'browser_* tools to act on that specific tab. Use this to work across several tabs.',
+      'List ALL open browser tabs (tabId, title, url, windowId). Tabs the user placed in the ' +
+      'Pilot group are flagged "pilotGroup:true"; "activeTab" is the tab the user is looking at. ' +
+      'Pass any "tabId" to the other browser_* tools to act on that specific tab. Use this to find ' +
+      'a tab the user already has open (e.g. a page they want help with).',
     inputSchema: {},
   },
   async () => asText(await call('listTabs')),
