@@ -1073,6 +1073,10 @@ function SettingsPage({ bridge }: { bridge: boolean }) {
             Send a viewport screenshot with each message
           </label>
         )}
+        <label className="mt-2 flex cursor-pointer items-center gap-2 text-sm">
+          <input type="checkbox" checked={s.autoElements} onChange={(e) => apply({ autoElements: e.target.checked })} />
+          Attach the page's interactive elements to each message
+        </label>
       </Section>
 
       {/* ── Connection ──────────────────────────────────────────── */}

@@ -202,7 +202,9 @@ const PILOT_SYSTEM_PROMPT =
   'page open in parallel (a multi-tab workflow). Do NOT navigate or overwrite a tab the user is ' +
   'actively using (their YouTube, email, docs…) unless the task is about that tab; to work on one ' +
   'of their tabs, pass its tabId to the browser_* tools. ' +
-  'Every message includes the page the user is currently viewing. ' +
+  'Every message already includes the page the user is viewing (its URL, title, and a list of ' +
+  'interactive elements), so you start out aware of the page — only call browser_snapshot again ' +
+  'when the page changed after your own actions or you need element refs to click. ' +
   'ALWAYS use these browser_* tools for any web browsing or page interaction — never launch a ' +
   'separate or headless browser, and do not browse the web with any other tool. These browser_* ' +
   'tools are your ONLY tools; do not search for other tools. Do NOT run shell commands, read/write ' +

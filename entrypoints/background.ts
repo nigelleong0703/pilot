@@ -726,6 +726,33 @@ export default defineBackground(() => {
       return true; // async response
     }
 
+    // ── Side panel asks for the current page's interactive elements ──
+    if ((message as { type?: string }).type === 'PAGE_ELEMENTS') {
+      (async () => {
+        try {
+          const t = await liveActiveTab();
+          if (t.id == null || !/^https?:/.test(t.url ?? '')) {
+            return sendResponse({ url: t.url ?? '', title: t.title ?? '', nodes: [] });
+          }
+          // Content-script deep read first (no debugger attach on the user's tab).
+          let nodes: Array<{ role: string; label: string }> = [];
+          const deep = await deepRead(t.id).catch(() => null);
+          if (deep?.nodes?.length) {
+            nodes = deep.nodes.map((n) => ({ role: n.role, label: String(n.label ?? '') }));
+          } else {
+            const snap = await cdpSnapshot(t.id).catch(() => null);
+            nodes = (snap?.nodes ?? []).map((n: any) => ({ role: n.role, label: String(n.label ?? '') }));
+          }
+          const compact = nodes
+            .filter((n) => n.label.trim())
+            .slice(0, 80)
+            .map((n) => ({ role: n.role, label: n.label.slice(0, 80) }));
+          sendResponse({ url: t.url ?? '', title: t.title ?? '', nodes: compact });
+        } catch { sendResponse({ nodes: [] }); }
+      })();
+      return true; // async response
+    }
+
     // ── Pin the current tab for the duration of a turn ──
     if ((message as { type?: string }).type === 'PIN_TAB') {
       // Context = the page the user is actually viewing (so the agent knows

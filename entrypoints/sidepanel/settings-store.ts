@@ -16,7 +16,7 @@ interface SettingsState {
 export const useSettings = create<SettingsState>((set) => ({
   settings: {
     agentId: 'claude', customCmd: '', customArgs: '', model: '',
-    effort: 'medium', pageMode: 'cdp', autoScreenshot: true,
+    effort: 'medium', pageMode: 'cdp', autoScreenshot: true, autoElements: true,
     byoEnabled: false, byoProvider: 'openai', byoModel: '', byoApiKey: '', byoBaseUrl: '',
   },
   loaded: false,

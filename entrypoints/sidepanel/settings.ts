@@ -76,6 +76,7 @@ export interface Settings {
   effort: 'low' | 'medium' | 'high'; // reasoning effort → thinking-token budget
   pageMode: 'dom' | 'cdp'; // how Pilot reads/controls the page (CDP = default, like Claude)
   autoScreenshot: boolean; // send a viewport screenshot with each turn — only used in DOM mode
+  autoElements: boolean;   // append the current page's interactive elements to each turn
   // Bring-your-own-model: lets the chosen agent use your own provider/key instead
   // of its default login. Key is stored in chrome.storage (not encrypted).
   byoEnabled: boolean;
@@ -88,7 +89,7 @@ export interface Settings {
 const KEY = 'pilot.settings';
 const DEFAULT: Settings = {
   agentId: 'claude', customCmd: '', customArgs: '', model: '',
-  effort: 'medium', pageMode: 'cdp', autoScreenshot: true,
+  effort: 'medium', pageMode: 'cdp', autoScreenshot: true, autoElements: true,
   byoEnabled: false, byoProvider: 'openai', byoModel: '', byoApiKey: '', byoBaseUrl: '',
 };
 

@@ -164,6 +164,20 @@ export const acpAdapter: ChatModelAdapter = {
         if (pin?.url) pageCtx = `[The user is currently viewing: ${pin.title || pin.url}\n${pin.url}]\n\n`;
       } catch { /* no page context */ }
 
+      // Append the page's interactive elements so the agent starts "self-aware"
+      // of the page and doesn't have to call browser_snapshot just to see what's
+      // there. (Goes in pageCtx, which is always sent as text.)
+      if (s.autoElements) {
+        try {
+          const pe: any = await chrome.runtime.sendMessage({ type: 'PAGE_ELEMENTS' });
+          const nodes: Array<{ role: string; label: string }> = pe?.nodes ?? [];
+          if (nodes.length) {
+            const list = nodes.map((n) => `${n.role}${n.label ? ` "${n.label}"` : ''}`).join('; ');
+            pageCtx += `[Interactive elements on the current page (${nodes.length}): ${list}]\n\n`;
+          }
+        } catch { /* no elements */ }
+      }
+
       // ACP content blocks: page context + the user's text/image parts.
       const blocks: any[] = [];
       if (pageCtx) blocks.push({ type: 'text', text: pageCtx });
