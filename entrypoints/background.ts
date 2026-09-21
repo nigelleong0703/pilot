@@ -4,7 +4,7 @@ import {
   type PageCommand,
   type PageMethod,
 } from '../lib/protocol';
-import { cdpSnapshot, cdpClick, cdpType, cdpSelectOption, cdpGetText, cdpClickAt, cdpTypeText, cdpKey, cdpScroll, cdpScreenshot, detach as cdpDetach } from '../lib/cdp';
+import { cdpSnapshot, cdpClick, cdpType, cdpSelectOption, cdpGetText, cdpClickAt, cdpTypeText, cdpKey, cdpScroll, cdpScreenshot, cdpEvaluate, cdpConsole, cdpNetwork, cdpWaitFor, cdpResize, detach as cdpDetach } from '../lib/cdp';
 
 export interface RecordedStep {
   id: number;
@@ -374,7 +374,7 @@ export default defineBackground(() => {
 
   const PAGE_METHODS = new Set([
     'navigate', 'snapshot', 'click', 'type', 'selectOption', 'getText', 'screenshot', 'replay', 'newTab',
-    'clickAt', 'typeText', 'key', 'scroll',
+    'clickAt', 'typeText', 'key', 'scroll', 'evaluate', 'waitFor', 'resize',
   ]);
 
   // ── Deterministic replay ─────────────────────────────────────────────────
@@ -586,7 +586,7 @@ export default defineBackground(() => {
         const tab = await resolveTab(p);
         const cdp = await pageModeIsCdp();
         if (cdp) {
-          try { return await cdpScreenshot(tab.id!, !!p.grid); } catch { /* fall back */ }
+          try { return await cdpScreenshot(tab.id!, !!p.grid, !!p.fullPage); } catch { /* fall back */ }
         }
         const dataUrl = await captureScreenshot(tab.windowId);
         if (!dataUrl) throw new Error('Screenshot failed');
@@ -606,9 +606,42 @@ export default defineBackground(() => {
       }
       case 'scroll': {
         const tab = await resolveTab(p);
-        const x = Number(p.x ?? 0) || 200;
-        const y = Number(p.y ?? 0) || 300;
-        return cdpScroll(tab.id!, x, y, Number(p.dy ?? 0), Number(p.dx ?? 0));
+        return cdpScroll(tab.id!, p);
+      }
+      case 'evaluate': {
+        const tab = await resolveTab(p);
+        return cdpEvaluate(tab.id!, String(p.expression ?? 'null'), Number(p.timeoutMs) || undefined);
+      }
+      case 'console': {
+        const tab = await resolveTab(p);
+        return cdpConsole(tab.id!, {
+          level: p.level as string | undefined,
+          limit: p.limit as number | undefined,
+          clear: !!p.clear,
+        });
+      }
+      case 'network': {
+        const tab = await resolveTab(p);
+        return cdpNetwork(tab.id!, {
+          filter: p.filter as string | undefined,
+          status: p.status as number | undefined,
+          failedOnly: !!p.failedOnly,
+          limit: p.limit as number | undefined,
+          clear: !!p.clear,
+        });
+      }
+      case 'waitFor': {
+        const tab = await resolveTab(p);
+        return cdpWaitFor(tab.id!, {
+          text: p.text as string | undefined,
+          gone: p.gone as string | undefined,
+          selector: p.selector as string | undefined,
+          timeoutMs: p.timeoutMs as number | undefined,
+        });
+      }
+      case 'resize': {
+        const tab = await resolveTab(p);
+        return cdpResize(tab.id!, Number(p.width ?? 0), Number(p.height ?? 0), !!p.mobile);
       }
       case 'snapshot':
       case 'click':
@@ -624,11 +657,11 @@ export default defineBackground(() => {
         if (cdp) {
           try {
             switch (req.method) {
-              case 'snapshot': out = await cdpSnapshot(tab.id!); break;
+              case 'snapshot': out = await cdpSnapshot(tab.id!, { scope: p.scope as string | undefined, filter: p.filter as string | undefined, limit: p.limit as number | undefined }); break;
               case 'click': out = await cdpClick(tab.id!, p); break;
               case 'type': out = await cdpType(tab.id!, p); break;
               case 'selectOption': out = await cdpSelectOption(tab.id!, p); break;
-              case 'getText': out = await cdpGetText(tab.id!); break;
+              case 'getText': out = await cdpGetText(tab.id!, p.selector as string | undefined); break;
             }
             bglog(`cdp ${req.method} ok`);
           } catch (err) {
@@ -646,10 +679,13 @@ export default defineBackground(() => {
           }
         }
         // Deep fallback across ALL frames (reaches cross-origin iframes).
-        if (req.method === 'snapshot' && !((out?.nodes ?? []).length)) {
+        // A filtered/scoped snapshot legitimately returns nothing — don't let the
+        // deep all-frames fallback answer with the whole page instead.
+        if (req.method === 'snapshot' && !((out?.nodes ?? []).length) && !p.scope && !p.filter) {
           return { ...(await deepRead(tab.id!)), viaFrames: true };
         }
         if (req.method === 'getText') {
+          if (p.selector && out !== undefined) return out;
           const deep = await deepRead(tab.id!);
           if (deep.text.trim()) return { text: deep.text.slice(0, 40000), viaFrames: true };
           return { text: String(out?.text ?? '') };

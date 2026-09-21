@@ -1021,6 +1021,33 @@ extWss.on('connection', (ws) => {
   });
 });
 
+/** Why the extension isn't there — checked in the order you'd fix them, so the
+ *  caller gets the one next step instead of a generic "not connected". */
+function notConnectedError(): string {
+  const lines = ['Browser extension not connected — Pilot has no browser to drive.'];
+  if (!existsSync(EXT_PATH)) {
+    lines.push(
+      `The extension is NOT BUILT: nothing at ${EXT_PATH}.`,
+      'Build it with "npm run build" in the Pilot repo (or point PILOT_EXTENSION_PATH at an existing build).',
+    );
+  } else if (!findBrowserBinary()) {
+    lines.push(
+      'No Chrome/Edge/Chromium binary was found, so no browser could be launched.',
+      'Install one, or set PILOT_BROWSER_BIN to its path.',
+    );
+  } else {
+    lines.push(
+      `The extension is built at ${EXT_PATH} and a browser was launched, but nothing connected back.`,
+      'Most likely the extension is NOT INSTALLED or NOT ENABLED in the browser that is running:',
+      '  1. open chrome://extensions, turn on Developer mode,',
+      `  2. "Load unpacked" → ${EXT_PATH} (or re-enable it if it is listed but off),`,
+      '  3. if you loaded it in your everyday Chrome, keep that window open — Pilot talks to whichever browser has the extension.',
+      'After a rebuild, press Reload on the extension card. Then retry this call.',
+    );
+  }
+  return lines.join('\n');
+}
+
 // ── MCP client side (many connections) ────────────────────────────────────
 const cliWss = new WebSocketServer({ port: CLIENT_PORT });
 cliWss.on('error', onFatalPortError('client'));
@@ -1040,15 +1067,7 @@ cliWss.on('connection', (ws) => {
       // No browser connected — auto-launch one with the extension and wait.
       const ok = await ensureExtension();
       if (!ok || !extension || extension.readyState !== extension.OPEN) {
-        ws.send(
-          JSON.stringify({
-            id: msg.id,
-            ok: false,
-            error:
-              'Browser extension not connected. Tried to auto-launch a browser — make sure ' +
-              'Chrome/Edge is installed and the extension is built ("npm run build").',
-          }),
-        );
+        ws.send(JSON.stringify({ id: msg.id, ok: false, error: notConnectedError() }));
         return;
       }
     }

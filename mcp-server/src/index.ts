@@ -19,6 +19,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as resolvePath } from 'node:path';
 import { z } from 'zod';
@@ -329,13 +331,19 @@ server.registerTool(
   {
     title: 'Snapshot page',
     description:
-      'Return a list of visible interactive elements on a tab, each with a numeric "ref". ' +
-      'Use a ref with browser_click / browser_type. Call this before interacting.',
+      'Return a list of visible interactive elements on a tab, each with a numeric "ref" (and a ' +
+      '"href" for links). Use a ref with browser_click / browser_type. Call this before interacting. ' +
+      'On a big page, narrow it: `scope` limits the snapshot to one container (CSS selector), ' +
+      '`filter` keeps only elements whose label/role contains a string, `limit` caps the count ' +
+      '(default 200). The reply reports `total` and `truncated` so you know what was left out.',
     inputSchema: {
+      scope: z.string().optional().describe('CSS selector — only elements inside this container'),
+      filter: z.string().optional().describe('Case-insensitive substring to match on label or role'),
+      limit: z.number().int().optional().describe('Max elements to return (default 200, max 500)'),
       tabId: z.number().int().optional().describe('Tab to snapshot (defaults to active Pilot tab)'),
     },
   },
-  async ({ tabId }) => asText(await call('snapshot', { tabId })),
+  async ({ scope, filter, limit, tabId }) => asText(await call('snapshot', { scope, filter, limit, tabId })),
 );
 
 server.registerTool(
@@ -392,12 +400,16 @@ server.registerTool(
   'browser_get_text',
   {
     title: 'Get page text',
-    description: 'Return the visible text content of a tab (truncated).',
+    description:
+      'Return visible text from a tab. Pass `selector` to read ONE element (a dialog, a result ' +
+      'panel, a table) instead of the whole page — much smaller, and the usual way to read a ' +
+      'result without pulling the entire document back.',
     inputSchema: {
+      selector: z.string().optional().describe('CSS selector of the element to read (omit for the whole page)'),
       tabId: z.number().int().optional().describe('Tab to read (defaults to active Pilot tab)'),
     },
   },
-  async ({ tabId }) => asText(await call('getText', { tabId })),
+  async ({ selector, tabId }) => asText(await call('getText', { selector, tabId })),
 );
 
 server.registerTool(
@@ -405,18 +417,29 @@ server.registerTool(
   {
     title: 'Screenshot',
     description:
-      'Capture a screenshot of a tab viewport. Set `grid:true` to overlay a labelled ' +
-      '100px coordinate grid — use it to read pixel coordinates for browser_click_at.',
+      'Capture a screenshot of a tab. `fullPage:true` captures the whole scrollable page, not just ' +
+      'the viewport. `grid:true` overlays a labelled 100px coordinate grid — use it to read pixel ' +
+      'coordinates for browser_click_at. `path` saves the PNG to that absolute file path and ' +
+      'returns the path instead of the image (use it to keep large screenshots out of the ' +
+      'conversation, or to diff shots later).',
     inputSchema: {
       grid: z.boolean().optional().describe('Overlay a coordinate grid (labelled every 100px)'),
+      fullPage: z.boolean().optional().describe('Capture the entire scrollable page'),
+      path: z.string().optional().describe('Absolute path to save the PNG to (returns the path, not the image)'),
       tabId: z.number().int().optional().describe('Tab to capture (defaults to active Pilot tab)'),
     },
   },
-  async ({ grid, tabId }) => {
-    const { dataUrl } = (await call('screenshot', { grid, tabId })) as { dataUrl: string };
+  async ({ grid, fullPage, path, tabId }) => {
+    const { dataUrl } = (await call('screenshot', { grid, fullPage, tabId }, 60_000)) as { dataUrl: string };
     const m = /^data:(image\/\w+);base64,(.*)$/.exec(dataUrl) ?? [];
     const mime = m[1] ?? 'image/png';
     const base64 = m[2] ?? dataUrl;
+    if (path) {
+      if (!isAbsolute(path)) throw new Error(`path must be absolute, got "${path}"`);
+      const buf = Buffer.from(base64, 'base64');
+      writeFileSync(path, buf);
+      return asText({ saved: path, bytes: buf.length, fullPage: !!fullPage });
+    }
     return { content: [{ type: 'image' as const, data: base64, mimeType: mime }] };
   },
 );
@@ -442,9 +465,14 @@ server.registerTool(
   'browser_key',
   {
     title: 'Press a key',
-    description: 'Press a keyboard key on the focused element (Enter, Tab, Escape, ArrowUp/Down/Left/Right, PageUp/PageDown, Home, End, Backspace, Space…).',
+    description:
+      'Press a key, or a CHORD with modifiers, on the focused element. Single keys: Enter, Tab, ' +
+      'Escape, ArrowUp/Down/Left/Right, PageUp/PageDown, Home, End, Backspace, Delete, Space, or ' +
+      'any single character. Chords join with "+": "Control+k", "Meta+Shift+P", "Alt+Enter" ' +
+      '(Ctrl/Control, Cmd/Meta/Command, Alt/Option, Shift). The modifiers are really held down, ' +
+      "so the page's own hotkey handlers fire.",
     inputSchema: {
-      key: z.string().describe('Key name, e.g. "Enter", "Tab", "Escape", "ArrowDown"'),
+      key: z.string().describe('Key or chord, e.g. "Enter", "Escape", "Control+k", "Meta+Shift+P"'),
       tabId: z.number().int().optional(),
     },
   },
@@ -469,16 +497,131 @@ server.registerTool(
   'browser_scroll',
   {
     title: 'Scroll',
-    description: 'Scroll the page with a mouse wheel at (x,y) (default 200,300). Positive dy scrolls down.',
+    description:
+      'Scroll the page, or ONE container. By default it wheels the page at (x,y) (default 200,300); ' +
+      'positive dy scrolls down. Pass `selector` or `ref` to scroll that element instead — needed ' +
+      'for modals, side panels and virtualised lists, and for any page that locks body scroll, ' +
+      'where a page wheel moves nothing. `to:"top"|"bottom"` jumps to either end. Returns the ' +
+      "target's scrollTop/scrollHeight so you can tell whether it actually moved.",
     inputSchema: {
-      dy: z.number().describe('Vertical delta in pixels (positive = down)'),
+      dy: z.number().optional().describe('Vertical delta in pixels (positive = down)'),
       dx: z.number().optional().describe('Horizontal delta in pixels'),
+      selector: z.string().optional().describe('CSS selector of the scroll container'),
+      ref: z.number().int().optional().describe('ref from browser_snapshot, as the scroll container'),
+      to: z.enum(['top', 'bottom']).optional().describe('Jump to the top or bottom instead of a delta'),
       x: z.number().optional().describe('Wheel X in viewport pixels'),
       y: z.number().optional().describe('Wheel Y in viewport pixels'),
       tabId: z.number().int().optional(),
     },
   },
-  async ({ dy, dx, x, y, tabId }) => asText(await call('scroll', { dy, dx, x, y, tabId })),
+  async ({ dy, dx, selector, ref, to, x, y, tabId }) =>
+    asText(await call('scroll', { dy, dx, selector, ref, to, x, y, tabId })),
+);
+
+server.registerTool(
+  'browser_evaluate',
+  {
+    title: 'Evaluate JavaScript',
+    description:
+      "Run JavaScript in the page and get its value back as JSON. This is how you MEASURE a page " +
+      'instead of guessing from a screenshot: element geometry (getBoundingClientRect), computed ' +
+      'styles, scrollHeight vs clientHeight, attributes and hrefs, localStorage, app state on ' +
+      'window. Pass an EXPRESSION or an arrow function — "document.title", ' +
+      '"() => getComputedStyle(document.body).backgroundColor", ' +
+      '"() => [...document.querySelectorAll(\'a\')].map(a => a.href)". Functions are called and ' +
+      'promises awaited. Keep the expression narrow: the result is capped at 20k chars.',
+    inputSchema: {
+      expression: z.string().describe('JS expression or arrow function to evaluate in the page'),
+      timeoutMs: z.number().int().optional().describe('Timeout in ms (default 15000)'),
+      tabId: z.number().int().optional().describe('Tab to evaluate in (defaults to active Pilot tab)'),
+    },
+  },
+  async ({ expression, timeoutMs, tabId }) =>
+    asText(await call('evaluate', { expression, timeoutMs, tabId }, (timeoutMs ?? 15_000) + 5_000)),
+);
+
+server.registerTool(
+  'browser_console',
+  {
+    title: 'Read console messages',
+    description:
+      "Read the page's console: errors, warnings, logs, and browser-level messages such as " +
+      '"Failed to load resource: 401". Use it whenever a page misbehaves — it usually names the ' +
+      'cause directly. Filter with `level` ("error", "warning", "log", "info", or "all"). ' +
+      'Messages are only captured while Pilot is attached to the tab, so reload the page to ' +
+      'catch load-time errors. `clear:true` empties the buffer, which is the clean way to check ' +
+      'whether ONE action produced an error.',
+    inputSchema: {
+      level: z.string().optional().describe('"error" | "warning" | "log" | "info" | "all" (default all)'),
+      limit: z.number().int().optional().describe('Max messages, newest last (default 50)'),
+      clear: z.boolean().optional().describe('Empty the buffer after reading'),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ level, limit, clear, tabId }) => asText(await call('console', { level, limit, clear, tabId })),
+);
+
+server.registerTool(
+  'browser_network',
+  {
+    title: 'Read network requests',
+    description:
+      'List the network requests the page made (method, url, status, type, duration). Use it to ' +
+      'split a frontend bug from a backend one: if the API already returned the wrong JSON the ' +
+      'bug is server-side. `filter` matches a substring of the URL (e.g. "/api/"), ' +
+      '`failedOnly:true` keeps only failures and 4xx/5xx, `status` pins one code. Only requests ' +
+      'made while Pilot is attached are recorded, so reload or navigate to capture them.',
+    inputSchema: {
+      filter: z.string().optional().describe('Substring of the URL to match, e.g. "/api/"'),
+      status: z.number().int().optional().describe('Only this HTTP status'),
+      failedOnly: z.boolean().optional().describe('Only failures and 4xx/5xx responses'),
+      limit: z.number().int().optional().describe('Max requests, newest last (default 50)'),
+      clear: z.boolean().optional().describe('Empty the buffer after reading'),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ filter, status, failedOnly, limit, clear, tabId }) =>
+    asText(await call('network', { filter, status, failedOnly, limit, clear, tabId })),
+);
+
+server.registerTool(
+  'browser_wait_for',
+  {
+    title: 'Wait for the page',
+    description:
+      'Block until the page catches up: `text` appears, `gone` disappears, or `selector` matches. ' +
+      'Use this instead of re-screenshotting in a loop to wait out a load, a streamed answer or a ' +
+      'spinner. Throws if the timeout passes (default 10s).',
+    inputSchema: {
+      text: z.string().optional().describe('Wait until this text appears on the page'),
+      gone: z.string().optional().describe('Wait until this text disappears'),
+      selector: z.string().optional().describe('Wait until this CSS selector matches'),
+      timeoutMs: z.number().int().optional().describe('Timeout in ms (default 10000, max 120000)'),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ text, gone, selector, timeoutMs, tabId }) =>
+    asText(await call('waitFor', { text, gone, selector, timeoutMs, tabId }, (timeoutMs ?? 10_000) + 5_000)),
+);
+
+server.registerTool(
+  'browser_resize',
+  {
+    title: 'Resize the viewport',
+    description:
+      'Resize the viewport to test a responsive layout (e.g. 390x844 for a phone, 1440x900 for a ' +
+      'laptop). Set `mobile:true` to also emulate touch. Call with `width:0` to clear the ' +
+      'override and go back to the real window size — do that when you are done, or later ' +
+      'screenshots stay at the emulated size.',
+    inputSchema: {
+      width: z.number().int().describe('Viewport width in CSS px (0 clears the override)'),
+      height: z.number().int().optional().describe('Viewport height in CSS px'),
+      mobile: z.boolean().optional().describe('Emulate a mobile device (touch + mobile UA hints)'),
+      tabId: z.number().int().optional(),
+    },
+  },
+  async ({ width, height, mobile, tabId }) =>
+    asText(await call('resize', { width, height: height ?? 800, mobile, tabId })),
 );
 
 server.registerTool(

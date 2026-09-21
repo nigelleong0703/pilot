@@ -16,7 +16,107 @@ const attached = new Set<number>();
 const refMaps = new Map<number, Map<number, number>>();
 
 chrome.debugger?.onDetach.addListener((src) => {
-  if (src.tabId != null) attached.delete(src.tabId);
+  if (src.tabId != null) {
+    attached.delete(src.tabId);
+    consoleLog.delete(src.tabId);
+    netLog.delete(src.tabId);
+  }
+});
+
+// ── Console + network recording ────────────────────────────────────────────
+// CDP pushes these as events, so we keep a small ring buffer per tab and let
+// cdpConsole/cdpNetwork read it back. Only what happened WHILE attached is
+// visible — reload the page to capture load-time errors.
+export interface ConsoleEntry { t: number; level: string; text: string; url?: string; line?: number }
+export interface NetEntry { t: number; method: string; url: string; status?: number; type?: string; error?: string; ms?: number }
+const LOG_CAP = 200;
+const consoleLog = new Map<number, ConsoleEntry[]>();
+const netLog = new Map<number, NetEntry[]>();
+/** requestId -> the entry being filled in, per tab. */
+const netPending = new Map<number, Map<string, NetEntry>>();
+
+function push<T>(map: Map<number, T[]>, tabId: number, entry: T) {
+  const list = map.get(tabId) ?? [];
+  list.push(entry);
+  if (list.length > LOG_CAP) list.splice(0, list.length - LOG_CAP);
+  map.set(tabId, list);
+}
+
+/** One console argument, flattened to a short string. */
+function argText(a: any): string {
+  if (a == null) return '';
+  if (a.value !== undefined) return typeof a.value === 'string' ? a.value : JSON.stringify(a.value);
+  return String(a.description ?? a.unserializableValue ?? a.type ?? '');
+}
+
+chrome.debugger?.onEvent.addListener((src, method, params: any) => {
+  const tabId = src.tabId;
+  if (tabId == null || !params) return;
+  switch (method) {
+    case 'Runtime.consoleAPICalled': {
+      const frame = params.stackTrace?.callFrames?.[0];
+      push(consoleLog, tabId, {
+        t: Date.now(),
+        level: String(params.type ?? 'log'),
+        text: (params.args ?? []).map(argText).join(' ').slice(0, 2000),
+        url: frame?.url,
+        line: frame?.lineNumber != null ? frame.lineNumber + 1 : undefined,
+      });
+      break;
+    }
+    case 'Runtime.exceptionThrown': {
+      const d = params.exceptionDetails ?? {};
+      push(consoleLog, tabId, {
+        t: Date.now(),
+        level: 'error',
+        text: String(d.exception?.description ?? d.text ?? 'exception').slice(0, 2000),
+        url: d.url,
+        line: d.lineNumber != null ? d.lineNumber + 1 : undefined,
+      });
+      break;
+    }
+    case 'Log.entryAdded': {
+      // Where "Failed to load resource: 401" and other browser-level messages live.
+      const e = params.entry ?? {};
+      push(consoleLog, tabId, {
+        t: Date.now(),
+        level: String(e.level ?? 'info'),
+        text: String(e.text ?? '').slice(0, 2000),
+        url: e.url,
+        line: e.lineNumber != null ? e.lineNumber + 1 : undefined,
+      });
+      break;
+    }
+    case 'Network.requestWillBeSent': {
+      const entry: NetEntry = {
+        t: Date.now(),
+        method: String(params.request?.method ?? 'GET'),
+        url: String(params.request?.url ?? '').slice(0, 500),
+        type: params.type,
+      };
+      let pend = netPending.get(tabId);
+      if (!pend) { pend = new Map(); netPending.set(tabId, pend); }
+      pend.set(String(params.requestId), entry);
+      push(netLog, tabId, entry);
+      break;
+    }
+    case 'Network.responseReceived': {
+      const e = netPending.get(tabId)?.get(String(params.requestId));
+      if (e) { e.status = params.response?.status; e.type = params.type ?? e.type; }
+      break;
+    }
+    case 'Network.loadingFailed': {
+      const e = netPending.get(tabId)?.get(String(params.requestId));
+      if (e) e.error = String(params.errorText ?? 'failed');
+      break;
+    }
+    case 'Network.loadingFinished': {
+      const pend = netPending.get(tabId);
+      const e = pend?.get(String(params.requestId));
+      if (e) { e.ms = Date.now() - e.t; pend!.delete(String(params.requestId)); }
+      break;
+    }
+  }
 });
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -71,12 +171,19 @@ export async function ensureAttached(tabId: number): Promise<void> {
   await send(tabId, 'DOM.enable').catch(() => {});
   await send(tabId, 'Accessibility.enable').catch(() => {});
   await send(tabId, 'Page.enable').catch(() => {});
+  // Console + network recording: enabled on attach so a later browser_console /
+  // browser_network call has history to show, without a separate "start" step.
+  await send(tabId, 'Runtime.enable').catch(() => {});
+  await send(tabId, 'Log.enable').catch(() => {});
+  await send(tabId, 'Network.enable', { maxPostDataSize: 0 }).catch(() => {});
 }
 
 export function detach(tabId: number) {
   if (!attached.has(tabId)) return;
   chrome.debugger.detach({ tabId }, () => void chrome.runtime.lastError);
   attached.delete(tabId);
+  consoleLog.delete(tabId);
+  netLog.delete(tabId);
 }
 
 const INTERACTIVE = new Set([
@@ -85,20 +192,42 @@ const INTERACTIVE = new Set([
   'option', 'spinbutton',
 ]);
 
-export async function cdpSnapshot(tabId: number): Promise<{ url: string; title: string; nodes: any[] }> {
+export interface SnapshotOpts {
+  /** CSS selector — only return elements inside this container. */
+  scope?: string;
+  /** Case-insensitive substring; keeps nodes whose label or role matches. */
+  filter?: string;
+  /** Max nodes to return (default 200). */
+  limit?: number;
+}
+
+export async function cdpSnapshot(
+  tabId: number,
+  opts: SnapshotOpts = {},
+): Promise<{ url: string; title: string; nodes: any[]; total: number; truncated: boolean }> {
   await ensureAttached(tabId);
-  // Main frame + every iframe (many apps — e.g. Google consoles — render in frames).
+  // Main frame + every iframe (many apps — e.g. Google consoles — render in frames),
+  // or just one container's subtree when `scope` is given.
   let all: any[] = [];
+  if (opts.scope) {
+    const backendNodeId = await resolveBackend(tabId, { selector: opts.scope });
+    const r = await send(tabId, 'Accessibility.queryAXTree', { backendNodeId }).catch(() => null);
+    all = r?.nodes ?? [];
+  } else {
   const main = await send(tabId, 'Accessibility.getFullAXTree').catch(() => null);
   all = all.concat(main?.nodes ?? []);
   for (const frameId of await frameIds(tabId)) {
     const r = await send(tabId, 'Accessibility.getFullAXTree', { frameId }).catch(() => null);
     all = all.concat(r?.nodes ?? []);
   }
+  }
   const seen = new Set<string>();
   const map = new Map<number, number>();
   const out: any[] = [];
+  const needle = opts.filter?.trim().toLowerCase();
+  const limit = Math.max(1, Math.min(Number(opts.limit) || 200, 500));
   let ref = 1;
+  let total = 0;
   for (const n of all) {
     if (!n || n.ignored) continue;
     if (n.nodeId && seen.has(n.nodeId)) continue;
@@ -106,10 +235,18 @@ export async function cdpSnapshot(tabId: number): Promise<{ url: string; title: 
     const role = n.role?.value;
     if (!role || !INTERACTIVE.has(role)) continue;
     if (n.backendDOMNodeId == null) continue;
+    const label = (n.name?.value ?? '').trim();
+    if (needle && !label.toLowerCase().includes(needle) && !role.toLowerCase().includes(needle)) continue;
+    total++;
+    if (out.length >= limit) continue;
+    // Chrome exposes a link's target as an AX property — free, so include it.
+    const url = n.properties?.find((q: any) => q.name === 'url')?.value?.value;
     map.set(ref, n.backendDOMNodeId);
-    out.push({ ref, role, label: (n.name?.value ?? '').trim(), value: n.value?.value, tag: role });
+    out.push({
+      ref, role, label, value: n.value?.value, tag: role,
+      ...(url ? { href: String(url).slice(0, 200) } : {}),
+    });
     ref++;
-    if (ref > 300) break;
   }
   refMaps.set(tabId, map);
   let url = '';
@@ -123,7 +260,7 @@ export async function cdpSnapshot(tabId: number): Promise<{ url: string; title: 
     url = parsed[0] ?? '';
     title = parsed[1] ?? '';
   } catch { /* ignore */ }
-  return { url, title, nodes: out };
+  return { url, title, nodes: out, total, truncated: total > out.length };
 }
 
 /** Ids of all child frames (any depth) of the main frame. */
@@ -257,38 +394,129 @@ export async function cdpTypeText(tabId: number, text: string, submit = false): 
   return { typed: text };
 }
 
-/** Press a single key (Enter/Tab/Escape/arrows/…). */
-export async function cdpKey(tabId: number, key: string): Promise<unknown> {
-  await ensureAttached(tabId);
-  const defs: Record<string, { key: string; code: string; vk: number }> = {
-    Enter: { key: 'Enter', code: 'Enter', vk: 13 },
-    Tab: { key: 'Tab', code: 'Tab', vk: 9 },
-    Escape: { key: 'Escape', code: 'Escape', vk: 27 },
-    Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
-    Delete: { key: 'Delete', code: 'Delete', vk: 46 },
-    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
-    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
-    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
-    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
-    PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
-    PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
-    Home: { key: 'Home', code: 'Home', vk: 36 },
-    End: { key: 'End', code: 'End', vk: 35 },
-    Space: { key: ' ', code: 'Space', vk: 32 },
-  };
-  const d = defs[key] ?? { key, code: key, vk: 0 };
-  await send(tabId, 'Input.dispatchKeyEvent', {
-    type: 'keyDown', key: d.key, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk,
-  });
-  await send(tabId, 'Input.dispatchKeyEvent', {
-    type: 'keyUp', key: d.key, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk,
-  });
-  return { pressed: key };
+/** Named keys we know the code/keyCode for. Anything else falls back to the
+ *  single-character rules below (letters, digits, punctuation). */
+const KEY_DEFS: Record<string, { key: string; code: string; vk: number }> = {
+  Enter: { key: 'Enter', code: 'Enter', vk: 13 },
+  Tab: { key: 'Tab', code: 'Tab', vk: 9 },
+  Escape: { key: 'Escape', code: 'Escape', vk: 27 },
+  Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
+  Delete: { key: 'Delete', code: 'Delete', vk: 46 },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
+  PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
+  PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
+  Home: { key: 'Home', code: 'Home', vk: 36 },
+  End: { key: 'End', code: 'End', vk: 35 },
+  Space: { key: ' ', code: 'Space', vk: 32 },
+};
+
+/** CDP modifier bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8) + the modifier keys
+ *  themselves, which must be pressed around the chord for the page to see a
+ *  real Ctrl+K rather than a lone "k". */
+const MODIFIERS: Record<string, { bit: number; key: string; code: string; vk: number }> = {
+  alt:     { bit: 1, key: 'Alt',     code: 'AltLeft',     vk: 18 },
+  option:  { bit: 1, key: 'Alt',     code: 'AltLeft',     vk: 18 },
+  ctrl:    { bit: 2, key: 'Control', code: 'ControlLeft', vk: 17 },
+  control: { bit: 2, key: 'Control', code: 'ControlLeft', vk: 17 },
+  meta:    { bit: 4, key: 'Meta',    code: 'MetaLeft',    vk: 91 },
+  cmd:     { bit: 4, key: 'Meta',    code: 'MetaLeft',    vk: 91 },
+  command: { bit: 4, key: 'Meta',    code: 'MetaLeft',    vk: 91 },
+  shift:   { bit: 8, key: 'Shift',   code: 'ShiftLeft',   vk: 16 },
+};
+
+/** Split "Control+Shift+K" into its modifiers and the key they apply to. */
+function parseChord(spec: string) {
+  const parts = spec.split('+').map((s) => s.trim()).filter(Boolean);
+  // A trailing "+" means the key IS "+" (e.g. "Control++").
+  const last = parts.length ? parts[parts.length - 1]! : 'Enter';
+  const mods = parts.slice(0, -1);
+  const seen = new Map<string, { bit: number; key: string; code: string; vk: number }>();
+  let mask = 0;
+  for (const m of mods) {
+    const def = MODIFIERS[m.toLowerCase()];
+    if (!def) continue;
+    if (!seen.has(def.key)) { seen.set(def.key, def); mask |= def.bit; }
+  }
+  let main = KEY_DEFS[last];
+  if (!main && last.length === 1) {
+    const ch = last;
+    const upper = ch.toUpperCase();
+    const code = /[a-z]/i.test(ch) ? `Key${upper}` : /[0-9]/.test(ch) ? `Digit${ch}` : '';
+    main = { key: ch, code, vk: upper.charCodeAt(0) };
+  }
+  return { mods: [...seen.values()], mask, main: main ?? { key: last, code: last, vk: 0 } };
 }
 
-/** Scroll the page (mouse wheel at x,y). */
-export async function cdpScroll(tabId: number, x: number, y: number, dy: number, dx = 0): Promise<unknown> {
+/** Press a key or a CHORD: "Enter", "Escape", "Control+k", "Meta+Shift+P".
+ *  Modifier keys are pressed and released around the key, and the modifier
+ *  bitmask rides on the event, so page-level hotkey handlers fire. */
+export async function cdpKey(tabId: number, spec: string): Promise<unknown> {
   await ensureAttached(tabId);
+  const { mods, mask, main } = parseChord(spec);
+  for (const m of mods) {
+    await send(tabId, 'Input.dispatchKeyEvent', {
+      type: 'rawKeyDown', key: m.key, code: m.code,
+      windowsVirtualKeyCode: m.vk, nativeVirtualKeyCode: m.vk, modifiers: mask,
+    });
+  }
+  // `text` makes a printable key actually insert a character — but only when no
+  // Ctrl/Meta is held, otherwise Chrome treats the chord as a command, not input.
+  const printable = main.key.length === 1 && !(mask & 2) && !(mask & 4);
+  const base = {
+    key: main.key, code: main.code,
+    windowsVirtualKeyCode: main.vk, nativeVirtualKeyCode: main.vk, modifiers: mask,
+    ...(printable ? { text: main.key } : {}),
+  };
+  await send(tabId, 'Input.dispatchKeyEvent', { type: printable ? 'keyDown' : 'rawKeyDown', ...base });
+  await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  for (const m of [...mods].reverse()) {
+    await send(tabId, 'Input.dispatchKeyEvent', {
+      type: 'keyUp', key: m.key, code: m.code,
+      windowsVirtualKeyCode: m.vk, nativeVirtualKeyCode: m.vk, modifiers: 0,
+    });
+  }
+  await sleep(150);
+  return { pressed: spec, modifiers: mods.map((m) => m.key), key: main.key };
+}
+
+/** Scroll the page with a wheel event, or scroll ONE container when `selector`
+ *  / `ref` is given — needed for modals, virtualised lists and any page that
+ *  locks body scroll, where a page-level wheel event moves nothing. */
+export async function cdpScroll(tabId: number, params: Record<string, unknown>): Promise<unknown> {
+  await ensureAttached(tabId);
+  const dy = Number(params.dy ?? 0);
+  const dx = Number(params.dx ?? 0);
+  const to = typeof params.to === 'string' ? params.to : undefined;
+
+  if (params.selector != null || params.ref != null) {
+    const backend = await resolveBackend(tabId, params);
+    const { object } = await send(tabId, 'DOM.resolveNode', { backendNodeId: backend });
+    if (!object?.objectId) throw new Error('scroll target not found');
+    const r = await send(tabId, 'Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration:
+        'function(dx,dy,to){ if(to==="top") this.scrollTop=0; else if(to==="bottom") this.scrollTop=this.scrollHeight; else { this.scrollTop+=dy; this.scrollLeft+=dx; } return {scrollTop:this.scrollTop,scrollLeft:this.scrollLeft,scrollHeight:this.scrollHeight,clientHeight:this.clientHeight}; }',
+      arguments: [{ value: dx }, { value: dy }, { value: to ?? '' }],
+      returnByValue: true,
+    });
+    await sleep(150);
+    return { scrolled: params.selector ?? `ref ${params.ref}`, ...(r?.result?.value ?? {}) };
+  }
+
+  if (to) {
+    const r = await send(tabId, 'Runtime.evaluate', {
+      expression: `(()=>{const el=document.scrollingElement||document.documentElement;el.scrollTop=${to === 'bottom' ? 'el.scrollHeight' : '0'};return {scrollTop:el.scrollTop,scrollHeight:el.scrollHeight};})()`,
+      returnByValue: true,
+    });
+    await sleep(150);
+    return { scrolled: to, ...(r?.result?.value ?? {}) };
+  }
+
+  const x = Number(params.x ?? 0) || 200;
+  const y = Number(params.y ?? 0) || 300;
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
   await sleep(150);
   return { scrolled: { dy, dx } };
@@ -313,18 +541,42 @@ const GRID_JS = `(function(){
   document.documentElement.appendChild(layer);
 })()`;
 
-/** CDP screenshot of the tab, optionally with a coordinate grid overlay. */
-export async function cdpScreenshot(tabId: number, grid = false): Promise<{ dataUrl: string }> {
+/** CDP screenshot of the tab: viewport by default, the whole scrollable page
+ *  with `fullPage`, optionally with a coordinate grid overlay. */
+export async function cdpScreenshot(tabId: number, grid = false, fullPage = false): Promise<{ dataUrl: string }> {
   await ensureAttached(tabId);
   if (grid) await send(tabId, 'Runtime.evaluate', { expression: GRID_JS }).catch(() => {});
-  const r = await send(tabId, 'Page.captureScreenshot', { format: 'png' }).catch(() => null);
+  let shot: Record<string, unknown> = { format: 'png' };
+  if (fullPage) {
+    const m = await send(tabId, 'Page.getLayoutMetrics').catch(() => null);
+    const size = m?.cssContentSize ?? m?.contentSize;
+    if (size) {
+      // Chrome refuses absurdly tall captures; 20k px is plenty and still safe.
+      const height = Math.min(Math.ceil(size.height), 20_000);
+      shot = {
+        format: 'png',
+        captureBeyondViewport: true,
+        clip: { x: 0, y: 0, width: Math.ceil(size.width), height, scale: 1 },
+      };
+    }
+  }
+  const r = await send(tabId, 'Page.captureScreenshot', shot, 30_000).catch(() => null);
   if (grid) await send(tabId, 'Runtime.evaluate', { expression: 'var e=document.getElementById("__pilot_grid"); if(e) e.remove();' }).catch(() => {});
   if (!r?.data) throw new Error('screenshot failed');
   return { dataUrl: `data:image/png;base64,${r.data}` };
 }
 
-export async function cdpGetText(tabId: number): Promise<unknown> {
+export async function cdpGetText(tabId: number, selector?: string): Promise<unknown> {
   await ensureAttached(tabId);
+  if (selector) {
+    const r = await send(tabId, 'Runtime.evaluate', {
+      expression: `(()=>{const e=document.querySelector(${JSON.stringify(selector)});return e?(e.innerText||e.textContent||''):null;})()`,
+      returnByValue: true,
+    });
+    const v = r?.result?.value;
+    if (v == null) throw new Error(`getText: no element matches ${selector}`);
+    return { selector, text: String(v).slice(0, 20_000) };
+  }
   const read = async (contextId?: number) => {
     const r = await send(tabId, 'Runtime.evaluate', {
       expression: 'document.body ? document.body.innerText : ""',
@@ -342,4 +594,135 @@ export async function cdpGetText(tabId: number): Promise<unknown> {
     if (w?.executionContextId != null) text += '\n' + (await read(w.executionContextId));
   }
   return { text: text.slice(0, 20_000) };
+}
+
+// ── Read the page's own state ──────────────────────────────────────────────
+
+/**
+ * Run JavaScript in the page and return its value as JSON.
+ *
+ * `expression` is an EXPRESSION or an arrow function — `document.title`,
+ * `() => getComputedStyle(document.body).background`, `async () => (await
+ * fetch('/api/x')).status`. A function is called; a promise is awaited. The
+ * result is JSON-cloned in-page, so DOM nodes come back as their string form
+ * rather than failing the whole call.
+ */
+export async function cdpEvaluate(
+  tabId: number,
+  expression: string,
+  timeoutMs = 15_000,
+): Promise<unknown> {
+  await ensureAttached(tabId);
+  const wrapped = `(async()=>{const __v=(${expression});const __r=await(typeof __v==="function"?__v():__v);` +
+    `try{return JSON.parse(JSON.stringify(__r===undefined?null:__r));}catch(e){return String(__r);}})()`;
+  const r = await send(tabId, 'Runtime.evaluate', {
+    expression: wrapped,
+    awaitPromise: true,
+    returnByValue: true,
+    userGesture: true,
+  }, timeoutMs);
+  const d = r?.exceptionDetails;
+  if (d) throw new Error(String(d.exception?.description ?? d.text ?? 'evaluate failed'));
+  const value = r?.result?.value ?? null;
+  const json = JSON.stringify(value);
+  if (json && json.length > 20_000) {
+    return { truncated: true, note: 'result over 20k chars — narrow the expression', value: json.slice(0, 20_000) };
+  }
+  return { value };
+}
+
+/** Poll until `text` appears (or, with `gone`, disappears) / `selector` matches.
+ *  Beats sleeping or re-screenshotting to wait out a stream or a load. */
+export async function cdpWaitFor(
+  tabId: number,
+  opts: { text?: string; gone?: string; selector?: string; timeoutMs?: number },
+): Promise<unknown> {
+  await ensureAttached(tabId);
+  const timeoutMs = Math.min(Math.max(Number(opts.timeoutMs) || 10_000, 500), 120_000);
+  const started = Date.now();
+  const probe = opts.selector
+    ? `!!document.querySelector(${JSON.stringify(opts.selector)})`
+    : opts.gone
+      ? `!(document.body?document.body.innerText:"").includes(${JSON.stringify(opts.gone)})`
+      : `(document.body?document.body.innerText:"").includes(${JSON.stringify(opts.text ?? '')})`;
+  if (!opts.selector && !opts.gone && !opts.text) throw new Error('waitFor: pass text, gone or selector');
+  while (Date.now() - started < timeoutMs) {
+    const r = await send(tabId, 'Runtime.evaluate', { expression: probe, returnByValue: true }).catch(() => null);
+    if (r?.result?.value === true) return { ok: true, waitedMs: Date.now() - started };
+    await sleep(250);
+  }
+  throw new Error(`waitFor: timed out after ${timeoutMs}ms (${opts.selector ?? opts.gone ?? opts.text})`);
+}
+
+/** Resize the viewport (device emulation) to test responsive layouts.
+ *  `width: 0` clears the override and restores the real window size. */
+export async function cdpResize(
+  tabId: number,
+  width: number,
+  height: number,
+  mobile = false,
+): Promise<unknown> {
+  await ensureAttached(tabId);
+  if (!width || !height) {
+    await send(tabId, 'Emulation.clearDeviceMetricsOverride').catch(() => {});
+    await send(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: false }).catch(() => {});
+    return { cleared: true };
+  }
+  await send(tabId, 'Emulation.setDeviceMetricsOverride', {
+    width: Math.round(width), height: Math.round(height),
+    deviceScaleFactor: 0, mobile,
+  });
+  await send(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: mobile, maxTouchPoints: mobile ? 5 : 0 }).catch(() => {});
+  await sleep(250); // let the page reflow / re-render before the next read
+  return { width: Math.round(width), height: Math.round(height), mobile };
+}
+
+/** Console messages recorded since Pilot attached to this tab. */
+export async function cdpConsole(
+  tabId: number,
+  opts: { level?: string; limit?: number; clear?: boolean } = {},
+): Promise<unknown> {
+  await ensureAttached(tabId);
+  const all = consoleLog.get(tabId) ?? [];
+  const wanted = opts.level && opts.level !== 'all' ? String(opts.level).toLowerCase() : '';
+  // "error" should also surface console.assert/exception levels Chrome names differently.
+  const match = (e: ConsoleEntry) =>
+    !wanted || e.level.toLowerCase() === wanted || (wanted === 'error' && /error|assert|severe/i.test(e.level));
+  const hits = all.filter(match);
+  const limit = Math.max(1, Math.min(Number(opts.limit) || 50, LOG_CAP));
+  const out = hits.slice(-limit);
+  if (opts.clear) consoleLog.set(tabId, []);
+  return {
+    total: all.length,
+    matched: hits.length,
+    returned: out.length,
+    note: all.length ? undefined : 'Nothing recorded yet — messages are captured only while Pilot is attached, so reload the page to catch load-time errors.',
+    messages: out,
+  };
+}
+
+/** Network requests recorded since Pilot attached to this tab. */
+export async function cdpNetwork(
+  tabId: number,
+  opts: { filter?: string; status?: number; failedOnly?: boolean; limit?: number; clear?: boolean } = {},
+): Promise<unknown> {
+  await ensureAttached(tabId);
+  const all = netLog.get(tabId) ?? [];
+  const needle = opts.filter?.toLowerCase();
+  const hits = all.filter((e) => {
+    if (needle && !e.url.toLowerCase().includes(needle)) return false;
+    if (opts.status && e.status !== Number(opts.status)) return false;
+    if (opts.failedOnly && !(e.error || (e.status ?? 0) >= 400)) return false;
+    return true;
+  });
+  const limit = Math.max(1, Math.min(Number(opts.limit) || 50, LOG_CAP));
+  const out = hits.slice(-limit);
+  if (opts.clear) { netLog.set(tabId, []); netPending.delete(tabId); }
+  return {
+    total: all.length,
+    matched: hits.length,
+    returned: out.length,
+    note: all.length ? undefined : 'Nothing recorded yet — requests are captured only while Pilot is attached, so reload or navigate to capture them.',
+    requests: out,
+  };
 }

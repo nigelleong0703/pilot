@@ -38,6 +38,11 @@ export type BridgeMethod =
   | 'typeText'
   | 'key'
   | 'scroll'
+  | 'evaluate'
+  | 'console'
+  | 'network'
+  | 'waitFor'
+  | 'resize'
   | 'recorder.start'
   | 'recorder.stop'
   | 'recorder.clear'
@@ -99,4 +104,6 @@ export interface SnapshotNode {
   label: string;
   value?: string;
   tag: string;
+  /** Link target, when the element is a link. */
+  href?: string;
 }
